@@ -157,7 +157,7 @@ def main():
                 lines.append(f"{p:<{max_path_len}}: {size:<10}")
         return lines
     
-    title_line = f"\n// ==== PROCESSED {count} FILES ====\n"
+    title_line = f"// ==== PROCESSED {count} FILES ===="
     print(title_line)
 
     lines = [title_line]
