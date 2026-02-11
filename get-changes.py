@@ -114,9 +114,7 @@ def main():
                 continue
             if p not in new_idx:
                 deleted.append(p)
-
     
-     # --- size helpers ---
     def new_size(p: str) -> int:
         return new_idx.get(p, (0, ""))[0]
 
@@ -138,7 +136,7 @@ def main():
 
     def generate_grouped_log(title, items, size_fn):
         lines = []
-        lines.append(f"\n=== {title}: {len(items)} ===")
+        lines.append(f"\n[{title}]: {len(items)}")
         max_path_len = max(len(p) for p in items)
         if args.no_group:
             for p in items:
@@ -149,8 +147,8 @@ def main():
         for p in items:
             buckets[ext_key(p)].append(p)
         for ext in sorted(buckets.keys()):
-            lines.append(f"\n# {ext}")
             bucket = buckets[ext]
+            lines.append(f"\n[{ext}]: {len(bucket)}")
             bucket.sort(
                 key=lambda p: ((-size_fn(p) if size_desc else size_fn(p)), p.lower())
             )
@@ -159,7 +157,7 @@ def main():
                 lines.append(f"{p:<{max_path_len}}: {size:<10}")
         return lines
     
-    title_line = f"\n==== PROCESSED {count} FILES ====\n"
+    title_line = f"\n// ==== PROCESSED {count} FILES ====\n"
     print(title_line)
 
     lines = [title_line]
