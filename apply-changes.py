@@ -79,6 +79,33 @@ def parse_changes_file(changes_path: Path) -> dict[str, list[str]]:
     return result
 
 
+def parse_commit_dominance_config(config_path: Path) -> set["CommitDominanceRule"]:
+    """Parse text config lines like '<winner_commit> > <loser_commit>'."""
+    rules: set[CommitDominanceRule] = set()
+    with config_path.open("r", encoding="utf-8") as config_file:
+        for line_number, raw_line in enumerate(config_file, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("//"):
+                continue
+
+            if ">" not in line:
+                raise ValueError(
+                    "Invalid commit dominance config line "
+                    f"{line_number}: expected '<winner_commit> > <loser_commit>'"
+                )
+
+            winner, loser = [part.strip() for part in line.split(">", maxsplit=1)]
+            if not winner or not loser:
+                raise ValueError(
+                    "Invalid commit dominance config line "
+                    f"{line_number}: winner and loser commits must be non-empty"
+                )
+
+            rules.add(CommitDominanceRule(winner_commit=winner, loser_commit=loser))
+
+    return rules
+
+
 def copy_from_new(rel_path: str, old_root: Path, new_root: Path) -> None:
     src = new_root / rel_path
     dst = old_root / rel_path
@@ -109,8 +136,24 @@ class InformationalSkip:
 
 @dataclass
 class FileCommitDescription:
+    commit_hash: str
     commit_date: str
     description: str
+
+
+@dataclass(frozen=True)
+class CommitDominanceRule:
+    winner_commit: str
+    loser_commit: str
+
+
+@dataclass
+class ManualResolutionLogEntry:
+    rel_path: str
+    winner_commit: str
+    loser_commit: str
+    action: str
+    reason: str
 
 
 @dataclass
@@ -187,7 +230,7 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
             "--reverse",
             "--name-only",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
-            "--pretty=format:__COMMIT__%n%ad%n%s",
+            "--pretty=format:__COMMIT__%n%H%n%ad%n%s",
             "--diff-filter=AM",
             "HEAD",
         ],
@@ -199,7 +242,9 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
         return {}
 
     descriptions: dict[str, FileCommitDescription | None] = {}
-    current_description: FileCommitDescription | None = None
+    current_commit_hash: str | None = None
+    current_commit_date: str | None = None
+    current_commit_subject: str | None = None
 
     for raw_line in result.stdout.splitlines():
         line = raw_line.strip()
@@ -207,15 +252,21 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
             continue
 
         if line == "__COMMIT__":
-            current_description = None
+            current_commit_hash = None
+            current_commit_date = None
+            current_commit_subject = None
             continue
 
-        if current_description is None:
-            current_description = FileCommitDescription(commit_date=line, description="")
+        if current_commit_hash is None:
+            current_commit_hash = line
             continue
 
-        if current_description.description == "":
-            current_description.description = line
+        if current_commit_date is None:
+            current_commit_date = line
+            continue
+
+        if current_commit_subject is None:
+            current_commit_subject = line
             continue
 
         normalized_path = normalize_log_path(line)
@@ -224,8 +275,9 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
 
         # --reverse walks from oldest to newest, so overwrite to keep newest mainline commit.
         descriptions[normalized_path] = FileCommitDescription(
-            commit_date=current_description.commit_date,
-            description=current_description.description,
+            commit_hash=current_commit_hash,
+            commit_date=current_commit_date,
+            description=current_commit_subject,
         )
 
     return descriptions
@@ -248,7 +300,7 @@ def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescrip
             "--first-parent",
             "-1",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
-            "--format=%ad%n%s",
+            "--format=%H%n%ad%n%s",
             "--",
             rel_path,
         ],
@@ -261,11 +313,11 @@ def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescrip
         return None
 
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) < 2:
+    if len(lines) < 3:
         repo.description_cache[rel_path] = None
         return None
 
-    description = FileCommitDescription(commit_date=lines[0], description=lines[1])
+    description = FileCommitDescription(commit_hash=lines[0], commit_date=lines[1], description=lines[2])
     repo.description_cache[rel_path] = description
     return description
 
@@ -399,52 +451,113 @@ def decide_modified_copy(
     allow_never_modified_replace: bool,
     old_repo_meta: RepoMetadata,
     new_repo_meta: RepoMetadata,
-) -> ModifyDecision:
-    """Allow replacing MODIFIED file only when new_root has newer content by mtime."""
+    commit_dominance_rules: set[CommitDominanceRule],
+) -> tuple[ModifyDecision, ManualResolutionLogEntry | None]:
+    """Allow replacing MODIFIED file by mtime, with optional manual commit dominance."""
     src = new_root / rel_path
     dst = old_root / rel_path
 
     if not src.exists() or not src.is_file():
-        return ModifyDecision(
-            rel_path=rel_path,
-            should_copy=False,
-            reason=f"missing source in new_dir: {src.as_posix()}",
-            old_file_description=format_file_description(old_repo_meta, rel_path),
-            new_file_description=format_file_description(new_repo_meta, rel_path),
+        return (
+            ModifyDecision(
+                rel_path=rel_path,
+                should_copy=False,
+                reason=f"missing source in new_dir: {src.as_posix()}",
+                old_file_description=format_file_description(old_repo_meta, rel_path),
+                new_file_description=format_file_description(new_repo_meta, rel_path),
+            ),
+            None,
         )
     if not dst.exists() or not dst.is_file():
-        return ModifyDecision(
-            rel_path=rel_path,
-            should_copy=False,
-            reason=f"missing destination in old_dir: {dst.as_posix()}",
-            old_file_description=format_file_description(old_repo_meta, rel_path),
-            new_file_description=format_file_description(new_repo_meta, rel_path),
+        return (
+            ModifyDecision(
+                rel_path=rel_path,
+                should_copy=False,
+                reason=f"missing destination in old_dir: {dst.as_posix()}",
+                old_file_description=format_file_description(old_repo_meta, rel_path),
+                new_file_description=format_file_description(new_repo_meta, rel_path),
+            ),
+            None,
         )
 
     src_mtime = src.stat().st_mtime
     dst_mtime = dst.stat().st_mtime
     if src_mtime >= dst_mtime:
-        return ModifyDecision(rel_path=rel_path, should_copy=True)
+        return ModifyDecision(rel_path=rel_path, should_copy=True), None
+
+    old_file_description = get_file_description(old_repo_meta, rel_path)
+    new_file_description = get_file_description(new_repo_meta, rel_path)
+
+    if old_file_description is not None and new_file_description is not None:
+        old_commit = old_file_description.commit_hash
+        new_commit = new_file_description.commit_hash
+        new_wins = CommitDominanceRule(winner_commit=new_commit, loser_commit=old_commit)
+        old_wins = CommitDominanceRule(winner_commit=old_commit, loser_commit=new_commit)
+        if new_wins in commit_dominance_rules:
+            return (
+                ModifyDecision(
+                    rel_path=rel_path,
+                    should_copy=True,
+                    reason=(
+                        "copied by manual commit dominance override: "
+                        f"{new_commit} > {old_commit}"
+                    ),
+                ),
+                ManualResolutionLogEntry(
+                    rel_path=rel_path,
+                    winner_commit=new_commit,
+                    loser_commit=old_commit,
+                    action="copied-from-new",
+                    reason="manual commit dominance override",
+                ),
+            )
+
+        if old_wins in commit_dominance_rules:
+            return (
+                ModifyDecision(
+                    rel_path=rel_path,
+                    should_copy=False,
+                    reason=(
+                        "kept old_dir by manual commit dominance override: "
+                        f"{old_commit} > {new_commit}"
+                    ),
+                    old_file_description=format_file_description(old_repo_meta, rel_path),
+                    new_file_description=format_file_description(new_repo_meta, rel_path),
+                ),
+                ManualResolutionLogEntry(
+                    rel_path=rel_path,
+                    winner_commit=old_commit,
+                    loser_commit=new_commit,
+                    action="kept-old",
+                    reason="manual commit dominance override",
+                ),
+            )
 
     if allow_never_modified_replace and rel_path in added_never_modified_files:
-        return ModifyDecision(
-            rel_path=rel_path,
-            should_copy=True,
-            reason=(
-                "copied because file was added and never modified in git history, and "
-                "--allow-never-modified-replace is enabled"
+        return (
+            ModifyDecision(
+                rel_path=rel_path,
+                should_copy=True,
+                reason=(
+                    "copied because file was added and never modified in git history, and "
+                    "--allow-never-modified-replace is enabled"
+                ),
             ),
+            None,
         )
 
-    return ModifyDecision(
-        rel_path=rel_path,
-        should_copy=False,
-        reason=(
-            "old_dir file is newer "
-            f"(old mtime={dst_mtime:.6f}, new mtime={src_mtime:.6f})"
+    return (
+        ModifyDecision(
+            rel_path=rel_path,
+            should_copy=False,
+            reason=(
+                "old_dir file is newer "
+                f"(old mtime={dst_mtime:.6f}, new mtime={src_mtime:.6f})"
+            ),
+            old_file_description=format_file_description(old_repo_meta, rel_path),
+            new_file_description=format_file_description(new_repo_meta, rel_path),
         ),
-        old_file_description=format_file_description(old_repo_meta, rel_path),
-        new_file_description=format_file_description(new_repo_meta, rel_path),
+        None,
     )
 
 
@@ -455,7 +568,10 @@ def format_file_description(repo: RepoMetadata, rel_path: str) -> str:
             return "git metadata unavailable for file"
         return "directory is not a git repository"
 
-    return f"{description.commit_date} | {description.description}"
+    return (
+        f"{description.commit_hash} | {description.commit_date} | "
+        f"{description.description}"
+    )
 
 
 def render_conflicts(conflicts: list[ModifyDecision]) -> str:
@@ -475,6 +591,16 @@ def render_informational_skips(skips: list[InformationalSkip]) -> str:
         lines.append(f"- {skip.rel_path}: {skip.reason}")
         lines.append(f"  old_dir: {skip.old_file_description}")
         lines.append(f"  new_dir: {skip.new_file_description}")
+    return "\n".join(lines)
+
+
+def render_manual_resolution_log(entries: list[ManualResolutionLogEntry]) -> str:
+    lines = ["Manual commit dominance resolutions:"]
+    for entry in entries:
+        lines.append(
+            f"- {entry.rel_path}: {entry.action} ({entry.winner_commit} > {entry.loser_commit})"
+        )
+        lines.append(f"  reason: {entry.reason}")
     return "\n".join(lines)
 
 
@@ -552,11 +678,13 @@ def apply_changes(
     delete_exclude_patterns: list[str] | None,
     conflicts_output_file: Path | None,
     informational_skips_output_file: Path | None,
+    manual_resolution_output_file: Path | None,
     added_never_modified_files: set[str],
     new_added_never_modified_files: set[str],
     allow_never_modified_replace: bool,
     old_repo_meta: RepoMetadata,
     new_repo_meta: RepoMetadata,
+    commit_dominance_rules: set[CommitDominanceRule],
 ) -> None:
     changes = parse_changes_file(changes_file)
 
@@ -575,6 +703,7 @@ def apply_changes(
     deleted = 0
     conflicts: list[ModifyDecision] = []
     informational_skips: list[InformationalSkip] = []
+    manual_resolution_logs: list[ManualResolutionLogEntry] = []
 
     if apply_added:
         for rel_path in changes[SECTION_ADDED]:
@@ -600,7 +729,7 @@ def apply_changes(
             ):
                 progress.step()
                 continue
-            decision = decide_modified_copy(
+            decision, manual_log_entry = decide_modified_copy(
                 rel_path,
                 old_dir,
                 new_dir,
@@ -608,7 +737,11 @@ def apply_changes(
                 allow_never_modified_replace,
                 old_repo_meta,
                 new_repo_meta,
+                commit_dominance_rules,
             )
+            if manual_log_entry is not None:
+                manual_resolution_logs.append(manual_log_entry)
+
             if decision.should_copy:
                 copy_from_new(rel_path, old_dir, new_dir)
                 modified += 1
@@ -670,6 +803,20 @@ def apply_changes(
                 "Informational skips were written to: "
                 f"{informational_skips_output_file.as_posix()}"
             )
+
+    if manual_resolution_logs:
+        manual_resolution_text = render_manual_resolution_log(manual_resolution_logs)
+        print(manual_resolution_text)
+        if manual_resolution_output_file:
+            manual_resolution_output_file.parent.mkdir(parents=True, exist_ok=True)
+            manual_resolution_output_file.write_text(
+                manual_resolution_text + "\n", encoding="utf-8"
+            )
+            print(
+                "Manual dominance resolutions were written to: "
+                f"{manual_resolution_output_file.as_posix()}"
+            )
+
 
 
 def main() -> None:
@@ -739,6 +886,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--commit-dominance-config",
+        help=(
+            "Optional text config file with manual commit dominance rules in format "
+            "'<winner_commit> > <loser_commit>'"
+        ),
+    )
+    parser.add_argument(
+        "--manual-resolution-log-out",
+        help="Optional output file path for applied manual commit dominance resolutions",
+    )
+    parser.add_argument(
         "--allow-never-modified-replace",
         action="store_true",
         help=(
@@ -781,6 +939,24 @@ def main() -> None:
     if not new_git_history_info.is_git_repo:
         print("new_dir is not a git repository; informational skip detection is disabled")
 
+    commit_dominance_rules: set[CommitDominanceRule] = set()
+    if args.commit_dominance_config:
+        config_path = Path(args.commit_dominance_config).resolve()
+        if not config_path.exists() or not config_path.is_file():
+            raise SystemExit(
+                "commit dominance config does not exist or is not a file: "
+                f"{config_path.as_posix()}"
+            )
+        try:
+            commit_dominance_rules = parse_commit_dominance_config(config_path)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid commit dominance config: {exc}") from exc
+
+        print(
+            "Loaded manual commit dominance rules: "
+            f"{len(commit_dominance_rules)} from {config_path.as_posix()}"
+        )
+
     apply_changes(
         old_root,
         new_root,
@@ -795,11 +971,13 @@ def main() -> None:
         args.delete_exclude,
         Path(args.conflicts_out).resolve() if args.conflicts_out else None,
         Path(args.informational_skips_out).resolve() if args.informational_skips_out else None,
+        Path(args.manual_resolution_log_out).resolve() if args.manual_resolution_log_out else None,
         git_history_info.added_never_modified_files,
         new_git_history_info.added_never_modified_files,
         args.allow_never_modified_replace,
         build_repo_metadata(old_root),
         build_repo_metadata(new_root),
+        commit_dominance_rules,
     )
     print("Changes were applied successfully.")
 
