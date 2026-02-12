@@ -1,6 +1,7 @@
 import argparse
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -55,6 +56,53 @@ def copy_from_new(rel_path: str, old_root: Path, new_root: Path) -> None:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
+
+
+@dataclass
+class ModifyDecision:
+    rel_path: str
+    should_copy: bool
+    reason: str | None = None
+
+
+def decide_modified_copy(rel_path: str, old_root: Path, new_root: Path) -> ModifyDecision:
+    """Allow replacing MODIFIED file only when new_root has newer content by mtime."""
+    src = new_root / rel_path
+    dst = old_root / rel_path
+
+    if not src.exists() or not src.is_file():
+        return ModifyDecision(
+            rel_path=rel_path,
+            should_copy=False,
+            reason=f"missing source in new_dir: {src.as_posix()}",
+        )
+    if not dst.exists() or not dst.is_file():
+        return ModifyDecision(
+            rel_path=rel_path,
+            should_copy=False,
+            reason=f"missing destination in old_dir: {dst.as_posix()}",
+        )
+
+    src_mtime = src.stat().st_mtime
+    dst_mtime = dst.stat().st_mtime
+    if src_mtime >= dst_mtime:
+        return ModifyDecision(rel_path=rel_path, should_copy=True)
+
+    return ModifyDecision(
+        rel_path=rel_path,
+        should_copy=False,
+        reason=(
+            "old_dir file is newer "
+            f"(old mtime={dst_mtime:.6f}, new mtime={src_mtime:.6f})"
+        ),
+    )
+
+
+def render_conflicts(conflicts: list[ModifyDecision]) -> str:
+    lines = ["MODIFIED conflicts (old_dir file is newer or file is missing):"]
+    for conflict in conflicts:
+        lines.append(f"- {conflict.rel_path}: {conflict.reason}")
+    return "\n".join(lines)
 
 
 def delete_in_old(rel_path: str, old_root: Path) -> None:
@@ -123,16 +171,20 @@ def apply_changes(
     changes_file: Path,
     include_extensions: set[str] | None,
     apply_added: bool,
+    apply_modified: bool,
     apply_deleted: bool,
     add_include_patterns: list[str] | None,
     add_exclude_patterns: list[str] | None,
     delete_include_patterns: list[str] | None,
     delete_exclude_patterns: list[str] | None,
+    conflicts_output_file: Path | None,
 ) -> None:
     changes = parse_changes_file(changes_file)
 
     added = 0
+    modified = 0
     deleted = 0
+    conflicts: list[ModifyDecision] = []
 
     if apply_added:
         for rel_path in changes[SECTION_ADDED]:
@@ -146,10 +198,21 @@ def apply_changes(
             copy_from_new(rel_path, old_dir, new_dir)
             added += 1
 
-    # for rel_path in changes[SECTION_MODIFIED]:
-    #     if not should_process_path(rel_path, include_extensions):
-    #         continue
-    #     copy_from_new(rel_path, old_dir, new_dir)
+    if apply_modified:
+        for rel_path in changes[SECTION_MODIFIED]:
+            if not should_apply_for_action(
+                rel_path,
+                include_extensions,
+                add_include_patterns,
+                add_exclude_patterns,
+            ):
+                continue
+            decision = decide_modified_copy(rel_path, old_dir, new_dir)
+            if decision.should_copy:
+                copy_from_new(rel_path, old_dir, new_dir)
+                modified += 1
+            else:
+                conflicts.append(decision)
 
     if apply_deleted:
         for rel_path in changes[SECTION_DELETED]:
@@ -165,15 +228,23 @@ def apply_changes(
     
     print(
         f"Changes were applied from '{changes_file.as_posix()}': "
-        f"added {added} file(s), deleted {deleted} file(s)"
+        f"added {added} file(s), modified {modified} file(s), deleted {deleted} file(s)"
     )
+
+    if conflicts:
+        conflict_text = render_conflicts(conflicts)
+        print(conflict_text)
+        if conflicts_output_file:
+            conflicts_output_file.parent.mkdir(parents=True, exist_ok=True)
+            conflicts_output_file.write_text(conflict_text + "\n", encoding="utf-8")
+            print(f"Conflicts were written to: {conflicts_output_file.as_posix()}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Apply changes from a get-changes.py log. Supports applying only "
-            "added/deleted changes and filtering by extension or path patterns "
+            "added/modified/deleted changes and filtering by extension or path patterns "
             "(glob by default, regex via re:...)."
         )
     )
@@ -195,6 +266,11 @@ def main() -> None:
         "--only-delete",
         action="store_true",
         help="Apply only files listed in [DELETED] section",
+    )
+    mode_group.add_argument(
+        "--only-modified",
+        action="store_true",
+        help="Apply only files listed in [MODIFIED] section",
     )
     parser.add_argument(
         "--add-include",
@@ -219,6 +295,10 @@ def main() -> None:
         nargs="+",
         help="Patterns to exclude for DELETED files (glob or re:regex)",
     )
+    parser.add_argument(
+        "--conflicts-out",
+        help="Optional output file path for MODIFIED conflicts list",
+    )
     args = parser.parse_args()
 
     old_root = Path(args.old_dir).resolve()
@@ -236,8 +316,9 @@ def main() -> None:
     if args.extensions:
         include_extensions = {ext.lower().lstrip(".") for ext in args.extensions}
 
-    apply_added = not args.only_delete
-    apply_deleted = not args.only_add
+    apply_added = not args.only_delete and not args.only_modified
+    apply_modified = not args.only_add and not args.only_delete
+    apply_deleted = not args.only_add and not args.only_modified
 
     apply_changes(
         old_root,
@@ -245,11 +326,13 @@ def main() -> None:
         changes_path,
         include_extensions,
         apply_added,
+        apply_modified,
         apply_deleted,
         args.add_include,
         args.add_exclude,
         args.delete_include,
         args.delete_exclude,
+        Path(args.conflicts_out).resolve() if args.conflicts_out else None,
     )
     print("Changes were applied successfully.")
 
