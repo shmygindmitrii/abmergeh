@@ -108,6 +108,15 @@ def main() -> None:
         )
     )
     parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.cwd(),
+        help=(
+            "Path inside the target git repository. "
+            "Defaults to the current working directory."
+        ),
+    )
+    parser.add_argument(
         "paths",
         nargs="*",
         default=["."],
@@ -120,8 +129,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cwd = Path.cwd()
-    repo_root = get_repo_root(cwd)
+    repo_root = get_repo_root(args.root.resolve())
 
     restored, skipped = restore_mtime(
         repo_root,
