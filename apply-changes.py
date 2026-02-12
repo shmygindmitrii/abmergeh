@@ -101,11 +101,11 @@ class ModifyDecision:
 class GitHistoryInfo:
     is_git_repo: bool
     file_commit_timestamps: dict[str, int]
-    first_commit_added_files: set[str]
+    added_never_modified_files: set[str]
 
 
 def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
-    """Collect per-file commit timestamps and files added in the first commit."""
+    """Collect per-file commit timestamps and files that were added but never modified."""
     repo_check = subprocess.run(
         ["git", "-C", repo_root.as_posix(), "rev-parse", "--is-inside-work-tree"],
         capture_output=True,
@@ -116,7 +116,7 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
         return GitHistoryInfo(
             is_git_repo=False,
             file_commit_timestamps={},
-            first_commit_added_files=set(),
+            added_never_modified_files=set(),
         )
 
     log_cmd = [
@@ -146,48 +146,45 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
         # git outputs the newest commit first; keep first seen timestamp.
         file_commit_timestamps.setdefault(line, current_timestamp)
 
-    first_commit_result = subprocess.run(
-        ["git", "-C", repo_root.as_posix(), "rev-list", "--max-parents=0", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    first_commit_hashes = [h for h in first_commit_result.stdout.splitlines() if h.strip()]
-    if not first_commit_hashes:
-        raise ValueError("Unable to resolve first commit for repository")
-    first_commit = first_commit_hashes[0]
-
-    first_commit_files_result = subprocess.run(
+    status_log_result = subprocess.run(
         [
             "git",
             "-C",
             repo_root.as_posix(),
-            "show",
-            "--pretty=format:",
+            "log",
             "--name-status",
-            first_commit,
+            "--pretty=format:__COMMIT__",
+            "--diff-filter=AM",
+            "HEAD",
         ],
         capture_output=True,
         text=True,
         check=True,
     )
 
-    first_commit_added_files: set[str] = set()
-    for raw_line in first_commit_files_result.stdout.splitlines():
+    all_added_files: set[str] = set()
+    all_modified_files: set[str] = set()
+    for raw_line in status_log_result.stdout.splitlines():
         line = raw_line.strip()
         if not line:
+            continue
+        if line.startswith("__COMMIT__"):
             continue
         parts = line.split("\t", 1)
         if len(parts) != 2:
             continue
         status, rel_path = parts
         if status == "A":
-            first_commit_added_files.add(rel_path)
+            all_added_files.add(rel_path)
+        elif status == "M":
+            all_modified_files.add(rel_path)
+
+    added_never_modified_files = all_added_files - all_modified_files
 
     return GitHistoryInfo(
         is_git_repo=True,
         file_commit_timestamps=file_commit_timestamps,
-        first_commit_added_files=first_commit_added_files,
+        added_never_modified_files=added_never_modified_files,
     )
 
 
@@ -195,7 +192,7 @@ def decide_modified_copy(
     rel_path: str,
     old_root: Path,
     new_root: Path,
-    first_commit_added_files: set[str],
+    added_never_modified_files: set[str],
     allow_first_commit_added_replace: bool,
 ) -> ModifyDecision:
     """Allow replacing MODIFIED file only when new_root has newer content by mtime."""
@@ -220,12 +217,12 @@ def decide_modified_copy(
     if src_mtime >= dst_mtime:
         return ModifyDecision(rel_path=rel_path, should_copy=True)
 
-    if allow_first_commit_added_replace and rel_path in first_commit_added_files:
+    if allow_first_commit_added_replace and rel_path in added_never_modified_files:
         return ModifyDecision(
             rel_path=rel_path,
             should_copy=True,
             reason=(
-                "copied because file was added in the first commit and "
+                "copied because file was added and never modified in git history, and "
                 "--allow-first-commit-added-replace is enabled"
             ),
         )
@@ -320,7 +317,7 @@ def apply_changes(
     delete_include_patterns: list[str] | None,
     delete_exclude_patterns: list[str] | None,
     conflicts_output_file: Path | None,
-    first_commit_added_files: set[str],
+    added_never_modified_files: set[str],
     allow_first_commit_added_replace: bool,
 ) -> None:
     changes = parse_changes_file(changes_file)
@@ -368,7 +365,7 @@ def apply_changes(
                 rel_path,
                 old_dir,
                 new_dir,
-                first_commit_added_files,
+                added_never_modified_files,
                 allow_first_commit_added_replace,
             )
             if decision.should_copy:
@@ -469,8 +466,8 @@ def main() -> None:
         "--allow-first-commit-added-replace",
         action="store_true",
         help=(
-            "Allow replacing MODIFIED files that were added in the first commit "
-            "of old_dir even if new_dir file has older mtime."
+            "Allow replacing MODIFIED files that were added and never modified "
+            "in old_dir git history even if new_dir file has older mtime."
         ),
     )
     args = parser.parse_args()
@@ -499,7 +496,7 @@ def main() -> None:
         print(
             "Git history metadata loaded: "
             f"{len(git_history_info.file_commit_timestamps)} file(s) with commit timestamps, "
-            f"{len(git_history_info.first_commit_added_files)} file(s) added in first commit"
+            f"{len(git_history_info.added_never_modified_files)} file(s) added and never modified"
         )
     else:
         print("old_dir is not a git repository; proceeding without git history metadata")
@@ -517,7 +514,7 @@ def main() -> None:
         args.delete_include,
         args.delete_exclude,
         Path(args.conflicts_out).resolve() if args.conflicts_out else None,
-        git_history_info.first_commit_added_files,
+        git_history_info.added_never_modified_files,
         args.allow_first_commit_added_replace,
     )
     print("Changes were applied successfully.")
