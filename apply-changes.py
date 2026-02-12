@@ -219,7 +219,41 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
 
 
 def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescription | None:
-    return repo.description_cache.get(rel_path)
+    if rel_path in repo.description_cache:
+        return repo.description_cache[rel_path]
+
+    if not repo.is_git_repo:
+        repo.description_cache[rel_path] = None
+        return None
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo.root.as_posix(),
+            "log",
+            "-1",
+            "--date=format:%Y-%m-%d %H:%M:%S %z",
+            "--format=%ad%n%s",
+            "--",
+            rel_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        repo.description_cache[rel_path] = None
+        return None
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        repo.description_cache[rel_path] = None
+        return None
+
+    description = FileCommitDescription(commit_date=lines[0], description=lines[1])
+    repo.description_cache[rel_path] = description
+    return description
 
 
 def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
