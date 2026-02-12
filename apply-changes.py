@@ -127,45 +127,99 @@ def build_repo_metadata(repo_root: Path) -> RepoMetadata:
         check=False,
     )
     is_git_repo = repo_check.returncode == 0 and repo_check.stdout.strip().lower() == "true"
-    return RepoMetadata(root=repo_root, is_git_repo=is_git_repo, description_cache={})
+
+    description_cache: dict[str, FileCommitDescription | None] = {}
+    if is_git_repo:
+        description_cache = collect_recent_file_descriptions(repo_root)
+
+    return RepoMetadata(root=repo_root, is_git_repo=is_git_repo, description_cache=description_cache)
 
 
-def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescription | None:
-    if rel_path in repo.description_cache:
-        return repo.description_cache[rel_path]
+def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDescription | None]:
+    """Collect last commit date/subject per file with a single git-log pass."""
+    toplevel_result = subprocess.run(
+        ["git", "-C", repo_root.as_posix(), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if toplevel_result.returncode != 0:
+        return {}
 
-    if not repo.is_git_repo:
-        repo.description_cache[rel_path] = None
+    repo_top_level = Path(toplevel_result.stdout.strip()).resolve()
+    try:
+        path_prefix = repo_root.resolve().relative_to(repo_top_level)
+        path_prefix_str = path_prefix.as_posix()
+    except ValueError:
+        path_prefix_str = ""
+
+    def normalize_log_path(log_path: str) -> str | None:
+        rel = Path(log_path).as_posix()
+        if not path_prefix_str:
+            return rel
+        prefix = f"{path_prefix_str}/"
+        if rel == path_prefix_str:
+            return ""
+        if rel.startswith(prefix):
+            return rel[len(prefix) :]
         return None
 
     result = subprocess.run(
         [
             "git",
             "-C",
-            repo.root.as_posix(),
+            repo_root.as_posix(),
             "log",
-            "-1",
+            "--name-only",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
-            "--format=%ad%n%s",
-            "--",
-            rel_path,
+            "--pretty=format:__COMMIT__%n%ad%n%s",
+            "--diff-filter=AM",
+            "HEAD",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        repo.description_cache[rel_path] = None
-        return None
+        return {}
 
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) < 2:
-        repo.description_cache[rel_path] = None
-        return None
+    descriptions: dict[str, FileCommitDescription | None] = {}
+    current_description: FileCommitDescription | None = None
 
-    description = FileCommitDescription(commit_date=lines[0], description=lines[1])
-    repo.description_cache[rel_path] = description
-    return description
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line == "__COMMIT__":
+            current_description = None
+            continue
+
+        if current_description is None:
+            current_description = FileCommitDescription(commit_date=line, description="")
+            continue
+
+        if current_description.description == "":
+            current_description.description = line
+            continue
+
+        normalized_path = normalize_log_path(line)
+        if not normalized_path:
+            continue
+
+        descriptions.setdefault(
+            normalized_path,
+            FileCommitDescription(
+                commit_date=current_description.commit_date,
+                description=current_description.description,
+            ),
+        )
+
+    return descriptions
+
+
+def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescription | None:
+    return repo.description_cache.get(rel_path)
 
 
 def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
