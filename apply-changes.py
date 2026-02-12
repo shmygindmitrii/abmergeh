@@ -136,7 +136,7 @@ def build_repo_metadata(repo_root: Path) -> RepoMetadata:
 
 
 def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDescription | None]:
-    """Collect last commit date/subject per file with a single git-log pass."""
+    """Collect HEAD commit date/subject for files that exist at HEAD."""
     toplevel_result = subprocess.run(
         ["git", "-C", repo_root.as_posix(), "rev-parse", "--show-toplevel"],
         capture_output=True,
@@ -150,6 +150,8 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
     try:
         path_prefix = repo_root.resolve().relative_to(repo_top_level)
         path_prefix_str = path_prefix.as_posix()
+        if path_prefix_str == ".":
+            path_prefix_str = ""
     except ValueError:
         path_prefix_str = ""
 
@@ -164,56 +166,60 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
             return rel[len(prefix) :]
         return None
 
-    result = subprocess.run(
+    head_result = subprocess.run(
         [
             "git",
             "-C",
             repo_root.as_posix(),
-            "log",
-            "--name-only",
+            "show",
+            "-s",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
-            "--pretty=format:__COMMIT__%n%ad%n%s",
-            "--diff-filter=AM",
+            "--format=%ad%n%s",
             "HEAD",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.returncode != 0:
+    if head_result.returncode != 0:
+        return {}
+
+    head_lines = [line.strip() for line in head_result.stdout.splitlines() if line.strip()]
+    if len(head_lines) < 2:
+        return {}
+
+    head_description = FileCommitDescription(
+        commit_date=head_lines[0],
+        description=head_lines[1],
+    )
+
+    tree_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo_root.as_posix(),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if tree_result.returncode != 0:
         return {}
 
     descriptions: dict[str, FileCommitDescription | None] = {}
-    current_description: FileCommitDescription | None = None
-
-    for raw_line in result.stdout.splitlines():
+    for raw_line in tree_result.stdout.splitlines():
         line = raw_line.strip()
         if not line:
-            continue
-
-        if line == "__COMMIT__":
-            current_description = None
-            continue
-
-        if current_description is None:
-            current_description = FileCommitDescription(commit_date=line, description="")
-            continue
-
-        if current_description.description == "":
-            current_description.description = line
             continue
 
         normalized_path = normalize_log_path(line)
         if not normalized_path:
             continue
-
-        descriptions.setdefault(
-            normalized_path,
-            FileCommitDescription(
-                commit_date=current_description.commit_date,
-                description=current_description.description,
-            ),
-        )
+        descriptions.setdefault(normalized_path, head_description)
 
     return descriptions
 
@@ -231,10 +237,29 @@ def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescrip
             "git",
             "-C",
             repo.root.as_posix(),
-            "log",
-            "-1",
+            "show",
+            "-s",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
             "--format=%ad%n%s",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        repo.description_cache[rel_path] = None
+        return None
+
+    tree_check = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo.root.as_posix(),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
             "--",
             rel_path,
         ],
@@ -242,7 +267,7 @@ def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescrip
         text=True,
         check=False,
     )
-    if result.returncode != 0:
+    if tree_check.returncode != 0 or not tree_check.stdout.strip():
         repo.description_cache[rel_path] = None
         return None
 
@@ -281,6 +306,8 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
     try:
         path_prefix = repo_root.resolve().relative_to(repo_top_level)
         path_prefix_str = path_prefix.as_posix()
+        if path_prefix_str == ".":
+            path_prefix_str = ""
     except ValueError:
         path_prefix_str = ""
 
