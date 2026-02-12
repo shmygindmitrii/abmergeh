@@ -119,6 +119,31 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
             added_never_modified_files=set(),
         )
 
+    toplevel_result = subprocess.run(
+        ["git", "-C", repo_root.as_posix(), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    repo_top_level = Path(toplevel_result.stdout.strip()).resolve()
+    try:
+        path_prefix = repo_root.resolve().relative_to(repo_top_level)
+        path_prefix_str = path_prefix.as_posix()
+    except ValueError:
+        path_prefix_str = ""
+
+    def normalize_log_path(log_path: str) -> str | None:
+        """Convert git-log path (repo-root relative) to repo_root-relative path."""
+        rel = Path(log_path).as_posix()
+        if not path_prefix_str:
+            return rel
+        prefix = f"{path_prefix_str}/"
+        if rel == path_prefix_str:
+            return ""
+        if rel.startswith(prefix):
+            return rel[len(prefix) :]
+        return None
+
     log_cmd = [
         "git",
         "-C",
@@ -143,8 +168,12 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
 
         if current_timestamp is None:
             continue
+        normalized_line = normalize_log_path(line)
+        if not normalized_line:
+            continue
+
         # git outputs the newest commit first; keep first seen timestamp.
-        file_commit_timestamps.setdefault(line, current_timestamp)
+        file_commit_timestamps.setdefault(normalized_line, current_timestamp)
 
     status_log_result = subprocess.run(
         [
@@ -174,10 +203,13 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
         if len(parts) != 2:
             continue
         status, rel_path = parts
+        normalized_path = normalize_log_path(rel_path)
+        if not normalized_path:
+            continue
         if status == "A":
-            all_added_files.add(rel_path)
+            all_added_files.add(normalized_path)
         elif status == "M":
-            all_modified_files.add(rel_path)
+            all_modified_files.add(normalized_path)
 
     added_never_modified_files = all_added_files - all_modified_files
 
@@ -223,7 +255,7 @@ def decide_modified_copy(
             should_copy=True,
             reason=(
                 "copied because file was added and never modified in git history, and "
-                "--allow-first-commit-added-replace is enabled"
+                "--allow-never-modified-replace is enabled"
             ),
         )
 
