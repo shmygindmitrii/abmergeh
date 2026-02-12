@@ -1,4 +1,5 @@
 import argparse
+import re
 import shutil
 from pathlib import Path
 
@@ -73,42 +74,107 @@ def should_process_path(rel_path: str, include_extensions: set[str] | None) -> b
     return suffix in include_extensions
 
 
+def matches_patterns(rel_path: str, patterns: list[str] | None) -> bool:
+    """Return True if rel_path matches at least one pattern.
+
+    Supported pattern formats:
+    - Glob (default), e.g. ``src/**`` or ``*.py``
+    - Regex with ``re:`` prefix, e.g. ``re:^src/.+\.py$``
+
+    When no patterns are provided, everything matches.
+    """
+    if not patterns:
+        return True
+
+    path = Path(rel_path)
+    for pattern in patterns:
+        if pattern.startswith("re:"):
+            regex = pattern[3:]
+            try:
+                if re.search(regex, rel_path):
+                    return True
+            except re.error as exc:
+                raise ValueError(f"Invalid regex pattern '{pattern}': {exc}") from exc
+        elif path.match(pattern):
+            return True
+
+    return False
+
+
+def should_apply_for_action(
+    rel_path: str,
+    include_extensions: set[str] | None,
+    include_patterns: list[str] | None,
+    exclude_patterns: list[str] | None,
+) -> bool:
+    """Combine extension and path filters for a single file path."""
+    if not should_process_path(rel_path, include_extensions):
+        return False
+    if not matches_patterns(rel_path, include_patterns):
+        return False
+    if exclude_patterns and matches_patterns(rel_path, exclude_patterns):
+        return False
+    return True
+
+
 def apply_changes(
     old_dir: Path,
     new_dir: Path,
     changes_file: Path,
     include_extensions: set[str] | None,
+    apply_added: bool,
+    apply_deleted: bool,
+    add_include_patterns: list[str] | None,
+    add_exclude_patterns: list[str] | None,
+    delete_include_patterns: list[str] | None,
+    delete_exclude_patterns: list[str] | None,
 ) -> None:
     changes = parse_changes_file(changes_file)
 
     added = 0
     deleted = 0
 
-    for rel_path in changes[SECTION_ADDED]:
-        if not should_process_path(rel_path, include_extensions):
-            continue
-        copy_from_new(rel_path, old_dir, new_dir)
-        added += 1
+    if apply_added:
+        for rel_path in changes[SECTION_ADDED]:
+            if not should_apply_for_action(
+                rel_path,
+                include_extensions,
+                add_include_patterns,
+                add_exclude_patterns,
+            ):
+                continue
+            copy_from_new(rel_path, old_dir, new_dir)
+            added += 1
 
     # for rel_path in changes[SECTION_MODIFIED]:
     #     if not should_process_path(rel_path, include_extensions):
     #         continue
     #     copy_from_new(rel_path, old_dir, new_dir)
 
-    for rel_path in changes[SECTION_DELETED]:
-        if not should_process_path(rel_path, include_extensions):
-            continue
-        delete_in_old(rel_path, old_dir)
-        deleted += 1
+    if apply_deleted:
+        for rel_path in changes[SECTION_DELETED]:
+            if not should_apply_for_action(
+                rel_path,
+                include_extensions,
+                delete_include_patterns,
+                delete_exclude_patterns,
+            ):
+                continue
+            delete_in_old(rel_path, old_dir)
+            deleted += 1
     
-    print(f"Changes were applied from '{changes_file.as_posix()}': addded {added} file(s), deleted {deleted} file(s)")
+    print(
+        f"Changes were applied from '{changes_file.as_posix()}': "
+        f"added {added} file(s), deleted {deleted} file(s)"
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply changes from a get-changes.py log: copy ADDED files "
-            "from new_dir to old_dir and remove DELETED files from old_dir."
+            "Apply changes from a get-changes.py log. Supports applying only "
+            "added/deleted changes and filtering by extension or path patterns "
+            "(glob by default, regex via re:...)."
         )
     )
     parser.add_argument("old_dir", help="Directory to update")
@@ -118,6 +184,40 @@ def main() -> None:
         "--extensions",
         nargs="+",
         help="Process only listed extensions, e.g. --extensions py json md",
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--only-add",
+        action="store_true",
+        help="Apply only files listed in [ADDED] section",
+    )
+    mode_group.add_argument(
+        "--only-delete",
+        action="store_true",
+        help="Apply only files listed in [DELETED] section",
+    )
+    parser.add_argument(
+        "--add-include",
+        nargs="+",
+        help=(
+            "Patterns to include for ADDED files. Glob by default, "
+            "regex with re: prefix (e.g. re:^src/.+\\.py$)."
+        ),
+    )
+    parser.add_argument(
+        "--add-exclude",
+        nargs="+",
+        help="Patterns to exclude for ADDED files (glob or re:regex)",
+    )
+    parser.add_argument(
+        "--delete-include",
+        nargs="+",
+        help="Patterns to include for DELETED files (glob or re:regex)",
+    )
+    parser.add_argument(
+        "--delete-exclude",
+        nargs="+",
+        help="Patterns to exclude for DELETED files (glob or re:regex)",
     )
     args = parser.parse_args()
 
@@ -136,7 +236,21 @@ def main() -> None:
     if args.extensions:
         include_extensions = {ext.lower().lstrip(".") for ext in args.extensions}
 
-    apply_changes(old_root, new_root, changes_path, include_extensions)
+    apply_added = not args.only_delete
+    apply_deleted = not args.only_add
+
+    apply_changes(
+        old_root,
+        new_root,
+        changes_path,
+        include_extensions,
+        apply_added,
+        apply_deleted,
+        args.add_include,
+        args.add_exclude,
+        args.delete_include,
+        args.delete_exclude,
+    )
     print("Changes were applied successfully.")
 
 
