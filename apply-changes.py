@@ -81,10 +81,14 @@ def apply_changes(
 ) -> None:
     changes = parse_changes_file(changes_file)
 
+    added = 0
+    deleted = 0
+
     for rel_path in changes[SECTION_ADDED]:
         if not should_process_path(rel_path, include_extensions):
             continue
         copy_from_new(rel_path, old_dir, new_dir)
+        added += 1
 
     # for rel_path in changes[SECTION_MODIFIED]:
     #     if not should_process_path(rel_path, include_extensions):
@@ -95,6 +99,9 @@ def apply_changes(
         if not should_process_path(rel_path, include_extensions):
             continue
         delete_in_old(rel_path, old_dir)
+        deleted += 1
+    
+    print(f"Changes were applied from '{changes_file.as_posix()}': addded {added} file(s), deleted {deleted} file(s)")
 
 
 def main() -> None:
