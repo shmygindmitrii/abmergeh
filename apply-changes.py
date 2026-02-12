@@ -136,7 +136,10 @@ def build_repo_metadata(repo_root: Path) -> RepoMetadata:
 
 
 def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDescription | None]:
-    """Collect last commit date/subject per file with a single git-log pass."""
+    """Collect last first-parent commit date/subject per file.
+
+    Only commits on the mainline of HEAD are considered (no side-branch history).
+    """
     toplevel_result = subprocess.run(
         ["git", "-C", repo_root.as_posix(), "rev-parse", "--show-toplevel"],
         capture_output=True,
@@ -150,6 +153,8 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
     try:
         path_prefix = repo_root.resolve().relative_to(repo_top_level)
         path_prefix_str = path_prefix.as_posix()
+        if path_prefix_str == ".":
+            path_prefix_str = ""
     except ValueError:
         path_prefix_str = ""
 
@@ -170,6 +175,8 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
             "-C",
             repo_root.as_posix(),
             "log",
+            "--first-parent",
+            "--reverse",
             "--name-only",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
             "--pretty=format:__COMMIT__%n%ad%n%s",
@@ -207,12 +214,10 @@ def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDes
         if not normalized_path:
             continue
 
-        descriptions.setdefault(
-            normalized_path,
-            FileCommitDescription(
-                commit_date=current_description.commit_date,
-                description=current_description.description,
-            ),
+        # --reverse walks from oldest to newest, so overwrite to keep newest mainline commit.
+        descriptions[normalized_path] = FileCommitDescription(
+            commit_date=current_description.commit_date,
+            description=current_description.description,
         )
 
     return descriptions
@@ -232,6 +237,7 @@ def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescrip
             "-C",
             repo.root.as_posix(),
             "log",
+            "--first-parent",
             "-1",
             "--date=format:%Y-%m-%d %H:%M:%S %z",
             "--format=%ad%n%s",
@@ -281,6 +287,8 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
     try:
         path_prefix = repo_root.resolve().relative_to(repo_top_level)
         path_prefix_str = path_prefix.as_posix()
+        if path_prefix_str == ".":
+            path_prefix_str = ""
     except ValueError:
         path_prefix_str = ""
 
@@ -301,6 +309,8 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
         "-C",
         repo_root.as_posix(),
         "log",
+        "--first-parent",
+        "--reverse",
         "--name-only",
         "--pretty=format:__COMMIT__ %ct",
         "--diff-filter=AM",
@@ -324,8 +334,8 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
         if not normalized_line:
             continue
 
-        # git outputs the newest commit first; keep first seen timestamp.
-        file_commit_timestamps.setdefault(normalized_line, current_timestamp)
+        # --reverse walks from oldest to newest, so overwrite to keep newest mainline timestamp.
+        file_commit_timestamps[normalized_line] = current_timestamp
 
     status_log_result = subprocess.run(
         [
@@ -333,6 +343,7 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
             "-C",
             repo_root.as_posix(),
             "log",
+            "--first-parent",
             "--name-status",
             "--pretty=format:__COMMIT__",
             "--diff-filter=AM",
