@@ -1,6 +1,7 @@
 import argparse
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,36 @@ from pathlib import Path
 SECTION_ADDED = "ADDED"
 SECTION_MODIFIED = "MODIFIED"
 SECTION_DELETED = "DELETED"
+
+
+class ProgressTracker:
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.enabled = total > 0
+        self.start_monotonic = time.monotonic()
+        self.processed = 0
+        self.last_percent = -1
+
+        if self.enabled:
+            print(f"Total entries to process: {self.total}")
+
+    def step(self) -> None:
+        if not self.enabled:
+            return
+
+        self.processed += 1
+        percent = int((self.processed / self.total) * 100)
+        if percent == self.last_percent:
+            return
+
+        self.last_percent = percent
+        elapsed = time.monotonic() - self.start_monotonic
+        per_item = elapsed / self.processed if self.processed else 0.0
+        remaining = max(self.total - self.processed, 0)
+        eta_seconds = int(per_item * remaining)
+        print(
+            f"Progress: {percent}% ({self.processed}/{self.total}), ETA: {eta_seconds}s"
+        )
 
 
 def parse_changes_file(changes_path: Path) -> dict[str, list[str]]:
@@ -181,6 +212,16 @@ def apply_changes(
 ) -> None:
     changes = parse_changes_file(changes_file)
 
+    total_entries = 0
+    if apply_added:
+        total_entries += len(changes[SECTION_ADDED])
+    if apply_modified:
+        total_entries += len(changes[SECTION_MODIFIED])
+    if apply_deleted:
+        total_entries += len(changes[SECTION_DELETED])
+
+    progress = ProgressTracker(total_entries)
+
     added = 0
     modified = 0
     deleted = 0
@@ -194,9 +235,11 @@ def apply_changes(
                 add_include_patterns,
                 add_exclude_patterns,
             ):
+                progress.step()
                 continue
             copy_from_new(rel_path, old_dir, new_dir)
             added += 1
+            progress.step()
 
     if apply_modified:
         for rel_path in changes[SECTION_MODIFIED]:
@@ -206,6 +249,7 @@ def apply_changes(
                 add_include_patterns,
                 add_exclude_patterns,
             ):
+                progress.step()
                 continue
             decision = decide_modified_copy(rel_path, old_dir, new_dir)
             if decision.should_copy:
@@ -213,6 +257,7 @@ def apply_changes(
                 modified += 1
             else:
                 conflicts.append(decision)
+            progress.step()
 
     if apply_deleted:
         for rel_path in changes[SECTION_DELETED]:
@@ -222,10 +267,12 @@ def apply_changes(
                 delete_include_patterns,
                 delete_exclude_patterns,
             ):
+                progress.step()
                 continue
             delete_in_old(rel_path, old_dir)
             deleted += 1
-    
+            progress.step()
+
     print(
         f"Changes were applied from '{changes_file.as_posix()}': "
         f"added {added} file(s), modified {modified} file(s), deleted {deleted} file(s)"
