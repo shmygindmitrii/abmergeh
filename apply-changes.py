@@ -171,6 +171,7 @@ def apply_changes(
     changes_file: Path,
     include_extensions: set[str] | None,
     apply_added: bool,
+    apply_modified: bool,
     apply_deleted: bool,
     add_include_patterns: list[str] | None,
     add_exclude_patterns: list[str] | None,
@@ -197,6 +198,7 @@ def apply_changes(
             copy_from_new(rel_path, old_dir, new_dir)
             added += 1
 
+    if apply_modified:
         for rel_path in changes[SECTION_MODIFIED]:
             if not should_apply_for_action(
                 rel_path,
@@ -242,7 +244,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Apply changes from a get-changes.py log. Supports applying only "
-            "added/deleted changes and filtering by extension or path patterns "
+            "added/modified/deleted changes and filtering by extension or path patterns "
             "(glob by default, regex via re:...)."
         )
     )
@@ -264,6 +266,11 @@ def main() -> None:
         "--only-delete",
         action="store_true",
         help="Apply only files listed in [DELETED] section",
+    )
+    mode_group.add_argument(
+        "--only-modified",
+        action="store_true",
+        help="Apply only files listed in [MODIFIED] section",
     )
     parser.add_argument(
         "--add-include",
@@ -309,8 +316,9 @@ def main() -> None:
     if args.extensions:
         include_extensions = {ext.lower().lstrip(".") for ext in args.extensions}
 
-    apply_added = not args.only_delete
-    apply_deleted = not args.only_add
+    apply_added = not args.only_delete and not args.only_modified
+    apply_modified = not args.only_add and not args.only_delete
+    apply_deleted = not args.only_add and not args.only_modified
 
     apply_changes(
         old_root,
@@ -318,6 +326,7 @@ def main() -> None:
         changes_path,
         include_extensions,
         apply_added,
+        apply_modified,
         apply_deleted,
         args.add_include,
         args.add_exclude,
