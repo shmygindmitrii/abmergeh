@@ -2,6 +2,7 @@
 import argparse
 import os
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -46,23 +47,55 @@ def get_last_commit_timestamp(repo_root: Path, file_path: Path) -> int | None:
     return int(output)
 
 
+class ProgressTracker:
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.enabled = total > 100
+        self.start_monotonic = time.monotonic()
+        self.current_percent = 0
+
+        if self.enabled:
+            print(f"Processing {self.total} file(s)...")
+
+    def update(self, processed: int) -> None:
+        if not self.enabled:
+            return
+
+        target_percent = int((processed / self.total) * 100)
+        while self.current_percent < target_percent:
+            self.current_percent += 1
+            elapsed = time.monotonic() - self.start_monotonic
+            per_item = elapsed / processed if processed else 0.0
+            remaining = max(self.total - processed, 0)
+            eta_seconds = int(per_item * remaining)
+            print(
+                f"Progress: {self.current_percent}% "
+                f"({processed}/{self.total}), ETA: {eta_seconds}s"
+            )
+
+
 def restore_mtime(repo_root: Path, file_paths: list[Path], dry_run: bool) -> tuple[int, int]:
     restored = 0
     skipped = 0
 
-    for file_path in file_paths:
+    progress = ProgressTracker(len(file_paths))
+
+    for index, file_path in enumerate(file_paths, start=1):
         if not file_path.exists() or not file_path.is_file():
             skipped += 1
+            progress.update(index)
             continue
 
         last_commit_time = get_last_commit_timestamp(repo_root, file_path)
         if last_commit_time is None:
             skipped += 1
+            progress.update(index)
             continue
 
         if not dry_run:
             os.utime(file_path, (last_commit_time, last_commit_time))
         restored += 1
+        progress.update(index)
 
     return restored, skipped
 
