@@ -100,6 +100,14 @@ class ModifyDecision:
 
 
 @dataclass
+class InformationalSkip:
+    rel_path: str
+    reason: str
+    old_file_description: str
+    new_file_description: str
+
+
+@dataclass
 class FileCommitDescription:
     commit_date: str
     description: str
@@ -459,6 +467,17 @@ def render_conflicts(conflicts: list[ModifyDecision]) -> str:
     return "\n".join(lines)
 
 
+def render_informational_skips(skips: list[InformationalSkip]) -> str:
+    lines = [
+        "MODIFIED informational skips (new_dir file is added-and-never-modified and does not override old_dir):"
+    ]
+    for skip in skips:
+        lines.append(f"- {skip.rel_path}: {skip.reason}")
+        lines.append(f"  old_dir: {skip.old_file_description}")
+        lines.append(f"  new_dir: {skip.new_file_description}")
+    return "\n".join(lines)
+
+
 def delete_in_old(rel_path: str, old_root: Path) -> None:
     target = old_root / rel_path
     if target.exists() and target.is_file():
@@ -532,7 +551,9 @@ def apply_changes(
     delete_include_patterns: list[str] | None,
     delete_exclude_patterns: list[str] | None,
     conflicts_output_file: Path | None,
+    informational_skips_output_file: Path | None,
     added_never_modified_files: set[str],
+    new_added_never_modified_files: set[str],
     allow_never_modified_replace: bool,
     old_repo_meta: RepoMetadata,
     new_repo_meta: RepoMetadata,
@@ -553,6 +574,7 @@ def apply_changes(
     modified = 0
     deleted = 0
     conflicts: list[ModifyDecision] = []
+    informational_skips: list[InformationalSkip] = []
 
     if apply_added:
         for rel_path in changes[SECTION_ADDED]:
@@ -591,7 +613,22 @@ def apply_changes(
                 copy_from_new(rel_path, old_dir, new_dir)
                 modified += 1
             else:
-                conflicts.append(decision)
+                if rel_path in new_added_never_modified_files:
+                    informational_skips.append(
+                        InformationalSkip(
+                            rel_path=rel_path,
+                            reason=(
+                                "skipped without conflict because new_dir file was added and never "
+                                "modified in git history"
+                            ),
+                            old_file_description=decision.old_file_description
+                            or format_file_description(old_repo_meta, rel_path),
+                            new_file_description=decision.new_file_description
+                            or format_file_description(new_repo_meta, rel_path),
+                        )
+                    )
+                else:
+                    conflicts.append(decision)
             progress.step()
 
     if apply_deleted:
@@ -620,6 +657,19 @@ def apply_changes(
             conflicts_output_file.parent.mkdir(parents=True, exist_ok=True)
             conflicts_output_file.write_text(conflict_text + "\n", encoding="utf-8")
             print(f"Conflicts were written to: {conflicts_output_file.as_posix()}")
+
+    if informational_skips:
+        informational_text = render_informational_skips(informational_skips)
+        print(informational_text)
+        if informational_skips_output_file:
+            informational_skips_output_file.parent.mkdir(parents=True, exist_ok=True)
+            informational_skips_output_file.write_text(
+                informational_text + "\n", encoding="utf-8"
+            )
+            print(
+                "Informational skips were written to: "
+                f"{informational_skips_output_file.as_posix()}"
+            )
 
 
 def main() -> None:
@@ -682,6 +732,13 @@ def main() -> None:
         help="Optional output file path for MODIFIED conflicts list",
     )
     parser.add_argument(
+        "--informational-skips-out",
+        help=(
+            "Optional output file path for MODIFIED entries skipped because new_dir files "
+            "were added and never modified"
+        ),
+    )
+    parser.add_argument(
         "--allow-never-modified-replace",
         action="store_true",
         help=(
@@ -711,6 +768,7 @@ def main() -> None:
     apply_deleted = not args.only_add and not args.only_modified
 
     git_history_info = collect_git_history_info(old_root)
+    new_git_history_info = collect_git_history_info(new_root)
     if git_history_info.is_git_repo:
         print(
             "Git history metadata loaded: "
@@ -719,6 +777,9 @@ def main() -> None:
         )
     else:
         print("old_dir is not a git repository; proceeding without git history metadata")
+
+    if not new_git_history_info.is_git_repo:
+        print("new_dir is not a git repository; informational skip detection is disabled")
 
     apply_changes(
         old_root,
@@ -733,7 +794,9 @@ def main() -> None:
         args.delete_include,
         args.delete_exclude,
         Path(args.conflicts_out).resolve() if args.conflicts_out else None,
+        Path(args.informational_skips_out).resolve() if args.informational_skips_out else None,
         git_history_info.added_never_modified_files,
+        new_git_history_info.added_never_modified_files,
         args.allow_never_modified_replace,
         build_repo_metadata(old_root),
         build_repo_metadata(new_root),
