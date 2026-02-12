@@ -193,7 +193,7 @@ def decide_modified_copy(
     old_root: Path,
     new_root: Path,
     added_never_modified_files: set[str],
-    allow_first_commit_added_replace: bool,
+    allow_never_modified_replace: bool,
 ) -> ModifyDecision:
     """Allow replacing MODIFIED file only when new_root has newer content by mtime."""
     src = new_root / rel_path
@@ -217,7 +217,7 @@ def decide_modified_copy(
     if src_mtime >= dst_mtime:
         return ModifyDecision(rel_path=rel_path, should_copy=True)
 
-    if allow_first_commit_added_replace and rel_path in added_never_modified_files:
+    if allow_never_modified_replace and rel_path in added_never_modified_files:
         return ModifyDecision(
             rel_path=rel_path,
             should_copy=True,
@@ -318,7 +318,7 @@ def apply_changes(
     delete_exclude_patterns: list[str] | None,
     conflicts_output_file: Path | None,
     added_never_modified_files: set[str],
-    allow_first_commit_added_replace: bool,
+    allow_never_modified_replace: bool,
 ) -> None:
     changes = parse_changes_file(changes_file)
 
@@ -366,7 +366,7 @@ def apply_changes(
                 old_dir,
                 new_dir,
                 added_never_modified_files,
-                allow_first_commit_added_replace,
+                allow_never_modified_replace,
             )
             if decision.should_copy:
                 copy_from_new(rel_path, old_dir, new_dir)
@@ -463,7 +463,7 @@ def main() -> None:
         help="Optional output file path for MODIFIED conflicts list",
     )
     parser.add_argument(
-        "--allow-first-commit-added-replace",
+        "--allow-never-modified-replace",
         action="store_true",
         help=(
             "Allow replacing MODIFIED files that were added and never modified "
@@ -515,7 +515,7 @@ def main() -> None:
         args.delete_exclude,
         Path(args.conflicts_out).resolve() if args.conflicts_out else None,
         git_history_info.added_never_modified_files,
-        args.allow_first_commit_added_replace,
+        args.allow_never_modified_replace,
     )
     print("Changes were applied successfully.")
 
