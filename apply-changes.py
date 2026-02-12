@@ -23,7 +23,8 @@ def parse_changes_file(changes_path: Path) -> dict[str, list[str]]:
             if not line:
                 continue
 
-            if line.startswith("// ==== PROCESSED"):
+            # Ignore any comment line.
+            if line.startswith("//"):
                 continue
 
             # Main section markers, e.g. [ADDED]: 2
@@ -61,29 +62,56 @@ def delete_in_old(rel_path: str, old_root: Path) -> None:
         target.unlink()
 
 
-def apply_changes(old_dir: Path, new_dir: Path, changes_file: Path) -> None:
+def should_process_path(rel_path: str, include_extensions: set[str] | None) -> bool:
+    if include_extensions is None:
+        return True
+
+    suffix = Path(rel_path).suffix.lower()
+    if suffix.startswith("."):
+        suffix = suffix[1:]
+
+    return suffix in include_extensions
+
+
+def apply_changes(
+    old_dir: Path,
+    new_dir: Path,
+    changes_file: Path,
+    include_extensions: set[str] | None,
+) -> None:
     changes = parse_changes_file(changes_file)
 
     for rel_path in changes[SECTION_ADDED]:
+        if not should_process_path(rel_path, include_extensions):
+            continue
         copy_from_new(rel_path, old_dir, new_dir)
 
-    for rel_path in changes[SECTION_MODIFIED]:
-        copy_from_new(rel_path, old_dir, new_dir)
+    # for rel_path in changes[SECTION_MODIFIED]:
+    #     if not should_process_path(rel_path, include_extensions):
+    #         continue
+    #     copy_from_new(rel_path, old_dir, new_dir)
 
     for rel_path in changes[SECTION_DELETED]:
+        if not should_process_path(rel_path, include_extensions):
+            continue
         delete_in_old(rel_path, old_dir)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply changes from a get-changes.py log: copy ADDED/MODIFIED files "
+            "Apply changes from a get-changes.py log: copy ADDED files "
             "from new_dir to old_dir and remove DELETED files from old_dir."
         )
     )
     parser.add_argument("old_dir", help="Directory to update")
     parser.add_argument("new_dir", help="Directory used as source for new/modified files")
     parser.add_argument("changes_file", help="Path to text output produced by get-changes.py")
+    parser.add_argument(
+        "--extensions",
+        nargs="+",
+        help="Process only listed extensions, e.g. --extensions py json md",
+    )
     args = parser.parse_args()
 
     old_root = Path(args.old_dir).resolve()
@@ -97,7 +125,11 @@ def main() -> None:
     if not changes_path.exists() or not changes_path.is_file():
         raise SystemExit(f"changes_file does not exist or is not a file: {changes_path}")
 
-    apply_changes(old_root, new_root, changes_path)
+    include_extensions = None
+    if args.extensions:
+        include_extensions = {ext.lower().lstrip(".") for ext in args.extensions}
+
+    apply_changes(old_root, new_root, changes_path, include_extensions)
     print("Changes were applied successfully.")
 
 
