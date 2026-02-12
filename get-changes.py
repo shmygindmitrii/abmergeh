@@ -102,7 +102,7 @@ def main():
             old_info = old_idx[p]
             if old_info[0] == size and old_info[1] == t:
                 old_hash = file_hash(old_info[2])
-                new_hash = file_hash(p)
+                new_hash = file_hash(path)
                 if old_hash != new_hash:
                     modified.append(p)
             else:
