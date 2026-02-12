@@ -170,6 +170,58 @@ class RepoMetadata:
     description_cache: dict[str, FileCommitDescription | None]
 
 
+def is_commit_ancestor(
+    repo_root: Path,
+    ancestor_commit: str,
+    descendant_commit: str,
+    cache: dict[tuple[str, str, str], bool],
+) -> bool:
+    cache_key = (repo_root.as_posix(), ancestor_commit, descendant_commit)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo_root.as_posix(),
+            "merge-base",
+            "--is-ancestor",
+            ancestor_commit,
+            descendant_commit,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    is_ancestor = result.returncode == 0
+    cache[cache_key] = is_ancestor
+    return is_ancestor
+
+
+def has_commit_dominance(
+    winner_commit: str,
+    loser_commit: str,
+    commit_dominance_rules: set[CommitDominanceRule],
+    old_repo_meta: RepoMetadata,
+    new_repo_meta: RepoMetadata,
+    cache: dict[tuple[str, str, str], bool],
+) -> bool:
+    """Check whether winner dominates loser directly or via older loser history."""
+    candidate_repos = [repo for repo in (old_repo_meta, new_repo_meta) if repo.is_git_repo]
+    for rule in commit_dominance_rules:
+        if rule.winner_commit != winner_commit:
+            continue
+        if loser_commit == rule.loser_commit:
+            return True
+
+        for repo in candidate_repos:
+            if is_commit_ancestor(repo.root, loser_commit, rule.loser_commit, cache):
+                return True
+
+    return False
+
+
 def build_repo_metadata(repo_root: Path) -> RepoMetadata:
     repo_check = subprocess.run(
         ["git", "-C", repo_root.as_posix(), "rev-parse", "--is-inside-work-tree"],
@@ -452,6 +504,7 @@ def decide_modified_copy(
     old_repo_meta: RepoMetadata,
     new_repo_meta: RepoMetadata,
     commit_dominance_rules: set[CommitDominanceRule],
+    commit_ancestry_cache: dict[tuple[str, str, str], bool],
 ) -> tuple[ModifyDecision, ManualResolutionLogEntry | None]:
     """Allow replacing MODIFIED file by mtime, with optional manual commit dominance."""
     src = new_root / rel_path
@@ -491,9 +544,14 @@ def decide_modified_copy(
     if old_file_description is not None and new_file_description is not None:
         old_commit = old_file_description.commit_hash
         new_commit = new_file_description.commit_hash
-        new_wins = CommitDominanceRule(winner_commit=new_commit, loser_commit=old_commit)
-        old_wins = CommitDominanceRule(winner_commit=old_commit, loser_commit=new_commit)
-        if new_wins in commit_dominance_rules:
+        if has_commit_dominance(
+            winner_commit=new_commit,
+            loser_commit=old_commit,
+            commit_dominance_rules=commit_dominance_rules,
+            old_repo_meta=old_repo_meta,
+            new_repo_meta=new_repo_meta,
+            cache=commit_ancestry_cache,
+        ):
             return (
                 ModifyDecision(
                     rel_path=rel_path,
@@ -512,7 +570,14 @@ def decide_modified_copy(
                 ),
             )
 
-        if old_wins in commit_dominance_rules:
+        if has_commit_dominance(
+            winner_commit=old_commit,
+            loser_commit=new_commit,
+            commit_dominance_rules=commit_dominance_rules,
+            old_repo_meta=old_repo_meta,
+            new_repo_meta=new_repo_meta,
+            cache=commit_ancestry_cache,
+        ):
             return (
                 ModifyDecision(
                     rel_path=rel_path,
@@ -704,6 +769,7 @@ def apply_changes(
     conflicts: list[ModifyDecision] = []
     informational_skips: list[InformationalSkip] = []
     manual_resolution_logs: list[ManualResolutionLogEntry] = []
+    commit_ancestry_cache: dict[tuple[str, str, str], bool] = {}
 
     if apply_added:
         for rel_path in changes[SECTION_ADDED]:
@@ -738,6 +804,7 @@ def apply_changes(
                 old_repo_meta,
                 new_repo_meta,
                 commit_dominance_rules,
+                commit_ancestry_cache,
             )
             if manual_log_entry is not None:
                 manual_resolution_logs.append(manual_log_entry)
@@ -889,7 +956,8 @@ def main() -> None:
         "--commit-dominance-config",
         help=(
             "Optional text config file with manual commit dominance rules in format "
-            "'<winner_commit> > <loser_commit>'"
+            "'<winner_commit> > <loser_commit>', where winner also dominates ancestors "
+            "of loser"
         ),
     )
     parser.add_argument(

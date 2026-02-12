@@ -1,4 +1,5 @@
 # Manual commit dominance rules for apply-changes.py
 # Format: <winner_commit_hash> > <loser_commit_hash>
+# Rule semantics: winner dominates loser and all commits that are ancestors of loser.
 # Example:
 # a8ace5143f941990eded6ceb5ca656d61b58f5b2 > 196cab1b9b8e1c3cdcb13f5524976979edc06452
