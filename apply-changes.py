@@ -95,6 +95,14 @@ class ModifyDecision:
     rel_path: str
     should_copy: bool
     reason: str | None = None
+    old_file_description: str | None = None
+    new_file_description: str | None = None
+
+
+@dataclass
+class FileCommitDescription:
+    commit_date: str
+    description: str
 
 
 @dataclass
@@ -102,6 +110,62 @@ class GitHistoryInfo:
     is_git_repo: bool
     file_commit_timestamps: dict[str, int]
     added_never_modified_files: set[str]
+
+
+@dataclass
+class RepoMetadata:
+    root: Path
+    is_git_repo: bool
+    description_cache: dict[str, FileCommitDescription | None]
+
+
+def build_repo_metadata(repo_root: Path) -> RepoMetadata:
+    repo_check = subprocess.run(
+        ["git", "-C", repo_root.as_posix(), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    is_git_repo = repo_check.returncode == 0 and repo_check.stdout.strip().lower() == "true"
+    return RepoMetadata(root=repo_root, is_git_repo=is_git_repo, description_cache={})
+
+
+def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescription | None:
+    if rel_path in repo.description_cache:
+        return repo.description_cache[rel_path]
+
+    if not repo.is_git_repo:
+        repo.description_cache[rel_path] = None
+        return None
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo.root.as_posix(),
+            "log",
+            "-1",
+            "--date=format:%Y-%m-%d %H:%M:%S %z",
+            "--format=%ad%n%s",
+            "--",
+            rel_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        repo.description_cache[rel_path] = None
+        return None
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        repo.description_cache[rel_path] = None
+        return None
+
+    description = FileCommitDescription(commit_date=lines[0], description=lines[1])
+    repo.description_cache[rel_path] = description
+    return description
 
 
 def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
@@ -226,6 +290,8 @@ def decide_modified_copy(
     new_root: Path,
     added_never_modified_files: set[str],
     allow_never_modified_replace: bool,
+    old_repo_meta: RepoMetadata,
+    new_repo_meta: RepoMetadata,
 ) -> ModifyDecision:
     """Allow replacing MODIFIED file only when new_root has newer content by mtime."""
     src = new_root / rel_path
@@ -236,12 +302,16 @@ def decide_modified_copy(
             rel_path=rel_path,
             should_copy=False,
             reason=f"missing source in new_dir: {src.as_posix()}",
+            old_file_description=format_file_description(old_repo_meta, rel_path),
+            new_file_description=format_file_description(new_repo_meta, rel_path),
         )
     if not dst.exists() or not dst.is_file():
         return ModifyDecision(
             rel_path=rel_path,
             should_copy=False,
             reason=f"missing destination in old_dir: {dst.as_posix()}",
+            old_file_description=format_file_description(old_repo_meta, rel_path),
+            new_file_description=format_file_description(new_repo_meta, rel_path),
         )
 
     src_mtime = src.stat().st_mtime
@@ -266,13 +336,27 @@ def decide_modified_copy(
             "old_dir file is newer "
             f"(old mtime={dst_mtime:.6f}, new mtime={src_mtime:.6f})"
         ),
+        old_file_description=format_file_description(old_repo_meta, rel_path),
+        new_file_description=format_file_description(new_repo_meta, rel_path),
     )
+
+
+def format_file_description(repo: RepoMetadata, rel_path: str) -> str:
+    description = get_file_description(repo, rel_path)
+    if description is None:
+        if repo.is_git_repo:
+            return "git metadata unavailable for file"
+        return "directory is not a git repository"
+
+    return f"{description.commit_date} | {description.description}"
 
 
 def render_conflicts(conflicts: list[ModifyDecision]) -> str:
     lines = ["MODIFIED conflicts (old_dir file is newer or file is missing):"]
     for conflict in conflicts:
         lines.append(f"- {conflict.rel_path}: {conflict.reason}")
+        lines.append(f"  old_dir: {conflict.old_file_description}")
+        lines.append(f"  new_dir: {conflict.new_file_description}")
     return "\n".join(lines)
 
 
@@ -351,6 +435,8 @@ def apply_changes(
     conflicts_output_file: Path | None,
     added_never_modified_files: set[str],
     allow_never_modified_replace: bool,
+    old_repo_meta: RepoMetadata,
+    new_repo_meta: RepoMetadata,
 ) -> None:
     changes = parse_changes_file(changes_file)
 
@@ -399,6 +485,8 @@ def apply_changes(
                 new_dir,
                 added_never_modified_files,
                 allow_never_modified_replace,
+                old_repo_meta,
+                new_repo_meta,
             )
             if decision.should_copy:
                 copy_from_new(rel_path, old_dir, new_dir)
@@ -548,6 +636,8 @@ def main() -> None:
         Path(args.conflicts_out).resolve() if args.conflicts_out else None,
         git_history_info.added_never_modified_files,
         args.allow_never_modified_replace,
+        build_repo_metadata(old_root),
+        build_repo_metadata(new_root),
     )
     print("Changes were applied successfully.")
 
