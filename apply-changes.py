@@ -99,6 +99,7 @@ class ModifyDecision:
 
 @dataclass
 class GitHistoryInfo:
+    is_git_repo: bool
     file_commit_timestamps: dict[str, int]
     first_commit_added_files: set[str]
 
@@ -112,7 +113,11 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
         check=False,
     )
     if repo_check.returncode != 0 or repo_check.stdout.strip().lower() != "true":
-        raise ValueError(f"old_dir is not a git repository: {repo_root.as_posix()}")
+        return GitHistoryInfo(
+            is_git_repo=False,
+            file_commit_timestamps={},
+            first_commit_added_files=set(),
+        )
 
     log_cmd = [
         "git",
@@ -180,6 +185,7 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
             first_commit_added_files.add(rel_path)
 
     return GitHistoryInfo(
+        is_git_repo=True,
         file_commit_timestamps=file_commit_timestamps,
         first_commit_added_files=first_commit_added_files,
     )
@@ -489,11 +495,14 @@ def main() -> None:
     apply_deleted = not args.only_add and not args.only_modified
 
     git_history_info = collect_git_history_info(old_root)
-    print(
-        "Git history metadata loaded: "
-        f"{len(git_history_info.file_commit_timestamps)} file(s) with commit timestamps, "
-        f"{len(git_history_info.first_commit_added_files)} file(s) added in first commit"
-    )
+    if git_history_info.is_git_repo:
+        print(
+            "Git history metadata loaded: "
+            f"{len(git_history_info.file_commit_timestamps)} file(s) with commit timestamps, "
+            f"{len(git_history_info.first_commit_added_files)} file(s) added in first commit"
+        )
+    else:
+        print("old_dir is not a git repository; proceeding without git history metadata")
 
     apply_changes(
         old_root,
