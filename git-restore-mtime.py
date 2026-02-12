@@ -38,13 +38,34 @@ def list_tracked_files(repo_root: Path, pathspecs: list[str]) -> list[Path]:
     return [repo_root / item for item in entries]
 
 
-def get_last_commit_timestamp(repo_root: Path, file_path: Path) -> int | None:
-    relative = file_path.relative_to(repo_root)
-    output = run_git_command(repo_root, ["log", "-1", "--format=%ct", "--", str(relative)])
-    output = output.strip()
-    if not output:
-        return None
-    return int(output)
+def get_last_commit_timestamps(
+    repo_root: Path,
+    pathspecs: list[str],
+) -> dict[Path, int]:
+    output = run_git_command(
+        repo_root,
+        ["log", "--format=__COMMIT__%ct", "--name-only", "--", *pathspecs],
+    )
+
+    last_timestamps: dict[Path, int] = {}
+    current_timestamp: int | None = None
+
+    for line in output.splitlines():
+        if not line:
+            continue
+
+        if line.startswith("__COMMIT__"):
+            current_timestamp = int(line.removeprefix("__COMMIT__"))
+            continue
+
+        if current_timestamp is None:
+            continue
+
+        relative_path = Path(line)
+        if relative_path not in last_timestamps:
+            last_timestamps[relative_path] = current_timestamp
+
+    return last_timestamps
 
 
 class ProgressTracker:
@@ -74,7 +95,12 @@ class ProgressTracker:
             )
 
 
-def restore_mtime(repo_root: Path, file_paths: list[Path], dry_run: bool) -> tuple[int, int]:
+def restore_mtime(
+    repo_root: Path,
+    file_paths: list[Path],
+    last_commit_timestamps: dict[Path, int],
+    dry_run: bool,
+) -> tuple[int, int]:
     restored = 0
     skipped = 0
 
@@ -86,7 +112,8 @@ def restore_mtime(repo_root: Path, file_paths: list[Path], dry_run: bool) -> tup
             progress.update(index)
             continue
 
-        last_commit_time = get_last_commit_timestamp(repo_root, file_path)
+        relative_path = file_path.relative_to(repo_root)
+        last_commit_time = last_commit_timestamps.get(relative_path)
         if last_commit_time is None:
             skipped += 1
             progress.update(index)
@@ -130,10 +157,13 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = get_repo_root(args.root.resolve())
+    file_paths = list_tracked_files(repo_root, args.paths)
+    last_commit_timestamps = get_last_commit_timestamps(repo_root, args.paths)
 
     restored, skipped = restore_mtime(
         repo_root,
-        list_tracked_files(repo_root, args.paths),
+        file_paths,
+        last_commit_timestamps,
         args.dry_run,
     )
 
