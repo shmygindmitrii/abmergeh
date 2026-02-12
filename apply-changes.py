@@ -640,7 +640,10 @@ def format_file_description(repo: RepoMetadata, rel_path: str) -> str:
 
 
 def render_conflicts(conflicts: list[ModifyDecision]) -> str:
-    lines = ["MODIFIED conflicts (old_dir file is newer or file is missing):"]
+    lines = [
+        f"Conflicting files: {len(conflicts)}",
+        "MODIFIED conflicts (old_dir file is newer or file is missing):",
+    ]
     for conflict in conflicts:
         lines.append(f"- {conflict.rel_path}: {conflict.reason}")
         lines.append(f"  old_dir: {conflict.old_file_description}")
@@ -650,7 +653,8 @@ def render_conflicts(conflicts: list[ModifyDecision]) -> str:
 
 def render_informational_skips(skips: list[InformationalSkip]) -> str:
     lines = [
-        "MODIFIED informational skips (new_dir file is added-and-never-modified and does not override old_dir):"
+        f"Conflicting files: {len(skips)}",
+        "MODIFIED informational skips (non-conflicting reasons to keep old_dir):"
     ]
     for skip in skips:
         lines.append(f"- {skip.rel_path}: {skip.reason}")
@@ -813,7 +817,21 @@ def apply_changes(
                 copy_from_new(rel_path, old_dir, new_dir)
                 modified += 1
             else:
-                if rel_path in new_added_never_modified_files:
+                if manual_log_entry is not None:
+                    informational_skips.append(
+                        InformationalSkip(
+                            rel_path=rel_path,
+                            reason=(
+                                "skipped without conflict because manual commit dominance "
+                                "kept old_dir"
+                            ),
+                            old_file_description=decision.old_file_description
+                            or format_file_description(old_repo_meta, rel_path),
+                            new_file_description=decision.new_file_description
+                            or format_file_description(new_repo_meta, rel_path),
+                        )
+                    )
+                elif rel_path in new_added_never_modified_files:
                     informational_skips.append(
                         InformationalSkip(
                             rel_path=rel_path,
