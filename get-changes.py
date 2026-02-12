@@ -137,6 +137,8 @@ def main():
     def generate_grouped_log(title, items, size_fn):
         lines = []
         lines.append(f"\n[{title}]: {len(items)}")
+        if len(items) == 0:
+            return lines
         max_path_len = max(len(p) for p in items)
         if args.no_group:
             for p in items:
