@@ -207,17 +207,34 @@ def has_commit_dominance(
     new_repo_meta: RepoMetadata,
     cache: dict[tuple[str, str, str], bool],
 ) -> bool:
-    """Check whether winner dominates loser directly or via older loser history."""
+    """Check whether winner dominates loser via rule winner descendants and loser ancestors."""
     candidate_repos = [repo for repo in (old_repo_meta, new_repo_meta) if repo.is_git_repo]
     for rule in commit_dominance_rules:
-        if rule.winner_commit != winner_commit:
-            continue
-        if loser_commit == rule.loser_commit:
-            return True
+        winner_dominates = winner_commit == rule.winner_commit
+        loser_is_covered = loser_commit == rule.loser_commit
 
         for repo in candidate_repos:
-            if is_commit_ancestor(repo.root, loser_commit, rule.loser_commit, cache):
+            if not winner_dominates and is_commit_ancestor(
+                repo.root,
+                rule.winner_commit,
+                winner_commit,
+                cache,
+            ):
+                winner_dominates = True
+
+            if not loser_is_covered and is_commit_ancestor(
+                repo.root,
+                loser_commit,
+                rule.loser_commit,
+                cache,
+            ):
+                loser_is_covered = True
+
+            if winner_dominates and loser_is_covered:
                 return True
+
+        if winner_dominates and loser_is_covered:
+            return True
 
     return False
 
@@ -975,7 +992,7 @@ def main() -> None:
         help=(
             "Optional text config file with manual commit dominance rules in format "
             "'<winner_commit> > <loser_commit>', where winner also dominates ancestors "
-            "of loser"
+            "of loser and descendants of winner"
         ),
     )
     parser.add_argument(
