@@ -1,45 +1,22 @@
 import argparse
-import subprocess
 import re
 import shutil
-import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from git_utils import (
+    RepoMetadata,
+    build_repo_metadata,
+    collect_git_history_info,
+    get_file_description,
+    is_commit_ancestor,
+)
+from progress_tracker import ProgressTracker
 
 
 SECTION_ADDED = "ADDED"
 SECTION_MODIFIED = "MODIFIED"
 SECTION_DELETED = "DELETED"
-
-
-class ProgressTracker:
-    def __init__(self, total: int) -> None:
-        self.total = total
-        self.enabled = total > 0
-        self.start_monotonic = time.monotonic()
-        self.processed = 0
-        self.last_percent = -1
-
-        if self.enabled:
-            print(f"Total entries to process: {self.total}")
-
-    def step(self) -> None:
-        if not self.enabled:
-            return
-
-        self.processed += 1
-        percent = int((self.processed / self.total) * 100)
-        if percent == self.last_percent:
-            return
-
-        self.last_percent = percent
-        elapsed = time.monotonic() - self.start_monotonic
-        per_item = elapsed / self.processed if self.processed else 0.0
-        remaining = max(self.total - self.processed, 0)
-        eta_seconds = int(per_item * remaining)
-        print(
-            f"Progress: {percent}% ({self.processed}/{self.total}), ETA: {eta_seconds}s"
-        )
 
 
 def parse_changes_file(changes_path: Path) -> dict[str, list[str]]:
@@ -134,13 +111,6 @@ class InformationalSkip:
     new_file_description: str
 
 
-@dataclass
-class FileCommitDescription:
-    commit_hash: str
-    commit_date: str
-    description: str
-
-
 @dataclass(frozen=True)
 class CommitDominanceRule:
     winner_commit: str
@@ -154,49 +124,6 @@ class ManualResolutionLogEntry:
     loser_commit: str
     action: str
     reason: str
-
-
-@dataclass
-class GitHistoryInfo:
-    is_git_repo: bool
-    file_commit_timestamps: dict[str, int]
-    added_never_modified_files: set[str]
-
-
-@dataclass
-class RepoMetadata:
-    root: Path
-    is_git_repo: bool
-    description_cache: dict[str, FileCommitDescription | None]
-
-
-def is_commit_ancestor(
-    repo_root: Path,
-    ancestor_commit: str,
-    descendant_commit: str,
-    cache: dict[tuple[str, str, str], bool],
-) -> bool:
-    cache_key = (repo_root.as_posix(), ancestor_commit, descendant_commit)
-    if cache_key in cache:
-        return cache[cache_key]
-
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo_root.as_posix(),
-            "merge-base",
-            "--is-ancestor",
-            ancestor_commit,
-            descendant_commit,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    is_ancestor = result.returncode == 0
-    cache[cache_key] = is_ancestor
-    return is_ancestor
 
 
 def has_commit_dominance(
@@ -237,279 +164,6 @@ def has_commit_dominance(
             return True
 
     return False
-
-
-def build_repo_metadata(repo_root: Path) -> RepoMetadata:
-    repo_check = subprocess.run(
-        ["git", "-C", repo_root.as_posix(), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    is_git_repo = repo_check.returncode == 0 and repo_check.stdout.strip().lower() == "true"
-
-    description_cache: dict[str, FileCommitDescription | None] = {}
-    if is_git_repo:
-        description_cache = collect_recent_file_descriptions(repo_root)
-
-    return RepoMetadata(root=repo_root, is_git_repo=is_git_repo, description_cache=description_cache)
-
-
-def collect_recent_file_descriptions(repo_root: Path) -> dict[str, FileCommitDescription | None]:
-    """Collect last first-parent commit date/subject per file.
-
-    Only commits on the mainline of HEAD are considered (no side-branch history).
-    """
-    toplevel_result = subprocess.run(
-        ["git", "-C", repo_root.as_posix(), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if toplevel_result.returncode != 0:
-        return {}
-
-    repo_top_level = Path(toplevel_result.stdout.strip()).resolve()
-    try:
-        path_prefix = repo_root.resolve().relative_to(repo_top_level)
-        path_prefix_str = path_prefix.as_posix()
-        if path_prefix_str == ".":
-            path_prefix_str = ""
-    except ValueError:
-        path_prefix_str = ""
-
-    def normalize_log_path(log_path: str) -> str | None:
-        rel = Path(log_path).as_posix()
-        if not path_prefix_str:
-            return rel
-        prefix = f"{path_prefix_str}/"
-        if rel == path_prefix_str:
-            return ""
-        if rel.startswith(prefix):
-            return rel[len(prefix) :]
-        return None
-
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo_root.as_posix(),
-            "log",
-            "--first-parent",
-            "--reverse",
-            "--name-only",
-            "--date=format:%Y-%m-%d %H:%M:%S %z",
-            "--pretty=format:__COMMIT__%n%H%n%ad%n%s",
-            "--diff-filter=AM",
-            "HEAD",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return {}
-
-    descriptions: dict[str, FileCommitDescription | None] = {}
-    current_commit_hash: str | None = None
-    current_commit_date: str | None = None
-    current_commit_subject: str | None = None
-
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if line == "__COMMIT__":
-            current_commit_hash = None
-            current_commit_date = None
-            current_commit_subject = None
-            continue
-
-        if current_commit_hash is None:
-            current_commit_hash = line
-            continue
-
-        if current_commit_date is None:
-            current_commit_date = line
-            continue
-
-        if current_commit_subject is None:
-            current_commit_subject = line
-            continue
-
-        normalized_path = normalize_log_path(line)
-        if not normalized_path:
-            continue
-
-        # --reverse walks from oldest to newest, so overwrite to keep newest mainline commit.
-        descriptions[normalized_path] = FileCommitDescription(
-            commit_hash=current_commit_hash,
-            commit_date=current_commit_date,
-            description=current_commit_subject,
-        )
-
-    return descriptions
-
-
-def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescription | None:
-    if rel_path in repo.description_cache:
-        return repo.description_cache[rel_path]
-
-    if not repo.is_git_repo:
-        repo.description_cache[rel_path] = None
-        return None
-
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo.root.as_posix(),
-            "log",
-            "--first-parent",
-            "-1",
-            "--date=format:%Y-%m-%d %H:%M:%S %z",
-            "--format=%H%n%ad%n%s",
-            "--",
-            rel_path,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        repo.description_cache[rel_path] = None
-        return None
-
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) < 3:
-        repo.description_cache[rel_path] = None
-        return None
-
-    description = FileCommitDescription(commit_hash=lines[0], commit_date=lines[1], description=lines[2])
-    repo.description_cache[rel_path] = description
-    return description
-
-
-def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
-    """Collect per-file commit timestamps and files that were added but never modified."""
-    repo_check = subprocess.run(
-        ["git", "-C", repo_root.as_posix(), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if repo_check.returncode != 0 or repo_check.stdout.strip().lower() != "true":
-        return GitHistoryInfo(
-            is_git_repo=False,
-            file_commit_timestamps={},
-            added_never_modified_files=set(),
-        )
-
-    toplevel_result = subprocess.run(
-        ["git", "-C", repo_root.as_posix(), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    repo_top_level = Path(toplevel_result.stdout.strip()).resolve()
-    try:
-        path_prefix = repo_root.resolve().relative_to(repo_top_level)
-        path_prefix_str = path_prefix.as_posix()
-        if path_prefix_str == ".":
-            path_prefix_str = ""
-    except ValueError:
-        path_prefix_str = ""
-
-    def normalize_log_path(log_path: str) -> str | None:
-        """Convert git-log path (repo-root relative) to repo_root-relative path."""
-        rel = Path(log_path).as_posix()
-        if not path_prefix_str:
-            return rel
-        prefix = f"{path_prefix_str}/"
-        if rel == path_prefix_str:
-            return ""
-        if rel.startswith(prefix):
-            return rel[len(prefix) :]
-        return None
-
-    log_cmd = [
-        "git",
-        "-C",
-        repo_root.as_posix(),
-        "log",
-        "--first-parent",
-        "--reverse",
-        "--name-only",
-        "--pretty=format:__COMMIT__ %ct",
-        "--diff-filter=AM",
-        "HEAD",
-    ]
-    log_result = subprocess.run(log_cmd, capture_output=True, text=True, check=True)
-
-    file_commit_timestamps: dict[str, int] = {}
-    current_timestamp: int | None = None
-    for raw_line in log_result.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("__COMMIT__ "):
-            current_timestamp = int(line.split(maxsplit=1)[1])
-            continue
-
-        if current_timestamp is None:
-            continue
-        normalized_line = normalize_log_path(line)
-        if not normalized_line:
-            continue
-
-        # --reverse walks from oldest to newest, so overwrite to keep newest mainline timestamp.
-        file_commit_timestamps[normalized_line] = current_timestamp
-
-    status_log_result = subprocess.run(
-        [
-            "git",
-            "-C",
-            repo_root.as_posix(),
-            "log",
-            "--first-parent",
-            "--name-status",
-            "--pretty=format:__COMMIT__",
-            "--diff-filter=AM",
-            "HEAD",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-    all_added_files: set[str] = set()
-    all_modified_files: set[str] = set()
-    for raw_line in status_log_result.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("__COMMIT__"):
-            continue
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        status, rel_path = parts
-        normalized_path = normalize_log_path(rel_path)
-        if not normalized_path:
-            continue
-        if status == "A":
-            all_added_files.add(normalized_path)
-        elif status == "M":
-            all_modified_files.add(normalized_path)
-
-    added_never_modified_files = all_added_files - all_modified_files
-
-    return GitHistoryInfo(
-        is_git_repo=True,
-        file_commit_timestamps=file_commit_timestamps,
-        added_never_modified_files=added_never_modified_files,
-    )
 
 
 def decide_modified_copy(
@@ -782,7 +436,11 @@ def apply_changes(
     if apply_deleted:
         total_entries += len(changes[SECTION_DELETED])
 
-    progress = ProgressTracker(total_entries)
+    progress = ProgressTracker(
+        total_entries,
+        enabled_threshold=1,
+        start_message=f"Total entries to process: {total_entries}",
+    )
 
     added = 0
     modified = 0
