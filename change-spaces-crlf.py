@@ -37,7 +37,7 @@ class ProgressTracker:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Recursively replace tabs with spaces and normalize line endings for files "
+            "Recursively replace tabs with spaces (if set) and normalize line endings for files "
             "inside a directory."
         )
     )
@@ -45,8 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--spaces",
         type=int,
-        default=4,
-        help="How many spaces to use for each tab character (default: 4).",
+        default=0,
+        help="How many spaces to use for each tab character (default: 0, do not change).",
     )
     parser.add_argument(
         "--line-ending",
@@ -113,7 +113,10 @@ def normalize_line_endings(data: bytes, line_ending: str) -> bytes:
 
 
 def transform_content(data: bytes, spaces: int, line_ending: str) -> bytes:
-    transformed = data.replace(b"\t", b" " * spaces)
+    if spaces > 0:
+        transformed = data.replace(b"\t", b" " * spaces)
+    else:
+        transformed = data
     transformed = normalize_line_endings(transformed, line_ending)
     return transformed
 
