@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from collections import defaultdict
 
-from git_utils import collect_git_history_info
+from git_utils import collect_git_history_info_with_ignored_modification_commits, load_commit_list
 
 DEFAULT_EXCLUDES = {
     ".git", ".svn", ".hg",
@@ -69,6 +69,13 @@ def main():
         action="store_true",
         help="Do not use mtime to detect modifications. Compare file contents when sizes match.",
     )
+    ap.add_argument(
+        "--ignore-modified-commits-file",
+        help=(
+            "Path to a file with commit hashes. Modifications made only in these commits "
+            "will be treated as never-modified-in-old."
+        ),
+    )
     args = ap.parse_args()
 
     exclude = set(DEFAULT_EXCLUDES)
@@ -80,7 +87,20 @@ def main():
     if not old_root.exists() or not new_root.exists():
         raise SystemExit("Old or new directory does not exist.")
 
-    old_git_history = collect_git_history_info(old_root)
+    ignored_modification_commits: set[str] = set()
+    if args.ignore_modified_commits_file:
+        commit_list_path = Path(args.ignore_modified_commits_file).resolve()
+        if not commit_list_path.exists() or not commit_list_path.is_file():
+            raise SystemExit(
+                "Ignore-modified-commits file does not exist or is not a file: "
+                f"{commit_list_path}"
+            )
+        ignored_modification_commits = load_commit_list(commit_list_path)
+
+    old_git_history = collect_git_history_info_with_ignored_modification_commits(
+        old_root,
+        ignored_modification_commits,
+    )
     old_never_modified_files = old_git_history.added_never_modified_files
     
     start = time.time()

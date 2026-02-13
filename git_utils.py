@@ -206,6 +206,32 @@ def get_file_description(repo: RepoMetadata, rel_path: str) -> FileCommitDescrip
 
 
 def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
+    return collect_git_history_info_with_ignored_modification_commits(repo_root, set())
+
+
+def load_commit_list(file_path: Path) -> set[str]:
+    commits: set[str] = set()
+    with file_path.open("r", encoding="utf-8") as commit_file:
+        for line_number, raw_line in enumerate(commit_file, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("//"):
+                continue
+
+            if any(ch.isspace() for ch in line):
+                raise ValueError(
+                    "Invalid commit list line "
+                    f"{line_number}: commit hash must not contain spaces"
+                )
+
+            commits.add(line)
+
+    return commits
+
+
+def collect_git_history_info_with_ignored_modification_commits(
+    repo_root: Path,
+    ignored_modification_commits: set[str],
+) -> GitHistoryInfo:
     if not is_git_repo(repo_root):
         return GitHistoryInfo(False, {}, set())
 
@@ -248,7 +274,7 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
             "log",
             "--first-parent",
             "--name-status",
-            "--pretty=format:__COMMIT__",
+            "--pretty=format:__COMMIT__ %H",
             "--diff-filter=AM",
             "HEAD",
         ],
@@ -257,9 +283,15 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
 
     all_added_files: set[str] = set()
     all_modified_files: set[str] = set()
+    current_commit_hash: str | None = None
     for raw_line in status_log_result.stdout.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("__COMMIT__"):
+        if not line:
+            continue
+
+        if line.startswith("__COMMIT__"):
+            parts = line.split(maxsplit=1)
+            current_commit_hash = parts[1] if len(parts) == 2 else None
             continue
 
         parts = line.split("\t", 1)
@@ -272,7 +304,7 @@ def collect_git_history_info(repo_root: Path) -> GitHistoryInfo:
 
         if status == "A":
             all_added_files.add(normalized_path)
-        elif status == "M":
+        elif status == "M" and current_commit_hash not in ignored_modification_commits:
             all_modified_files.add(normalized_path)
 
     return GitHistoryInfo(
