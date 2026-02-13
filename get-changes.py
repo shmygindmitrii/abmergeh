@@ -59,6 +59,11 @@ def main():
     ap.add_argument("--ignore-meta", action="store_true", help="Ignore Unity .meta files.")
     ap.add_argument("--size-asc", action="store_true", help="Sort by size ascending (default: descending).")
     ap.add_argument("--output-file", help="Redirect output to the file.")
+    ap.add_argument(
+        "--ignore-mtime",
+        action="store_true",
+        help="Do not use mtime to detect modifications. Compare file contents when sizes match.",
+    )
     args = ap.parse_args()
 
     exclude = set(DEFAULT_EXCLUDES)
@@ -90,7 +95,7 @@ def main():
 
     for p, (size, t, path) in new_idx.items():
         idx += 1
-        cur_complete = int(idx / count * 100);
+        cur_complete = int(idx / count * 100) if count else 100
         if cur_complete != prev_complete:
             print(f"Processed {cur_complete}%")
             prev_complete = cur_complete
@@ -100,12 +105,19 @@ def main():
             added.append(p)
         else:
             old_info = old_idx[p]
-            if old_info[0] == size and old_info[1] == t:
-                old_hash = file_hash(old_info[2])
-                new_hash = file_hash(path)
-                if old_hash != new_hash:
-                    modified.append(p)
-            else:
+            old_size, old_mtime, old_path = old_info
+
+            if old_size != size:
+                modified.append(p)
+                continue
+
+            if not args.ignore_mtime and old_mtime != t:
+                modified.append(p)
+                continue
+
+            old_hash = file_hash(old_path)
+            new_hash = file_hash(path)
+            if old_hash != new_hash:
                 modified.append(p)
 
     if args.include_deleted:
@@ -144,7 +156,7 @@ def main():
             for p in items:
                 size = size_fn(p)
                 lines.append(f"{p:<{max_path_len}}: {size:<10}")
-            return
+            return lines
         buckets = defaultdict(list)
         for p in items:
             buckets[ext_key(p)].append(p)
