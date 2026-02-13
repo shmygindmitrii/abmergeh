@@ -223,9 +223,32 @@ def load_commit_list(file_path: Path) -> set[str]:
                     f"{line_number}: commit hash must not contain spaces"
                 )
 
-            commits.add(line)
+            commits.add(line.lower())
 
     return commits
+
+
+def resolve_commit_hashes(repo_root: Path, commit_refs: set[str]) -> set[str]:
+    resolved_commits: set[str] = set()
+    for commit_ref in commit_refs:
+        commit = commit_ref.strip().lower()
+        if not commit:
+            continue
+
+        resolved = run_git_command(
+            repo_root,
+            ["rev-parse", "--verify", f"{commit}^{{commit}}"],
+            check=False,
+        )
+        if resolved.returncode == 0:
+            resolved_commits.add(resolved.stdout.strip().lower())
+            continue
+
+        # Keep the original token as a fallback. This allows prefix matching below
+        # even when the ref cannot be resolved in the current repository state.
+        resolved_commits.add(commit)
+
+    return resolved_commits
 
 
 def collect_git_history_info_with_ignored_modification_commits(
@@ -234,6 +257,11 @@ def collect_git_history_info_with_ignored_modification_commits(
 ) -> GitHistoryInfo:
     if not is_git_repo(repo_root):
         return GitHistoryInfo(False, {}, set())
+
+    resolved_ignored_modification_commits = resolve_commit_hashes(
+        repo_root,
+        ignored_modification_commits,
+    )
 
     path_prefix_str = get_path_prefix(repo_root)
     log_result = run_git_command(
@@ -304,7 +332,15 @@ def collect_git_history_info_with_ignored_modification_commits(
 
         if status == "A":
             all_added_files.add(normalized_path)
-        elif status == "M" and current_commit_hash not in ignored_modification_commits:
+        elif status == "M":
+            normalized_commit_hash = (current_commit_hash or "").lower()
+            commit_is_ignored = any(
+                normalized_commit_hash == ignored
+                or normalized_commit_hash.startswith(ignored)
+                for ignored in resolved_ignored_modification_commits
+            )
+            if commit_is_ignored:
+                continue
             all_modified_files.add(normalized_path)
 
     return GitHistoryInfo(
