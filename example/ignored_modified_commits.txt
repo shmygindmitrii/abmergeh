@@ -1,0 +1,4 @@
+# Commits listed here are ignored when determining "never modified" files.
+# One commit hash per line.
+
+0123456789abcdef0123456789abcdef01234567
