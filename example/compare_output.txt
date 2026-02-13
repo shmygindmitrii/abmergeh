@@ -1,0 +1,19 @@
+// ==== CHANGES DIFF ====
+// changes_a.txt vs changes_b.txt
+
+[ONLY_IN_FIRST]: 2
+
+[ADDED]: 2
+projectA/new.txt  
+projectA/readme.md
+
+[ONLY_IN_SECOND]: 3
+
+[ADDED]: 1
+projectA/another_new.txt
+
+[MODIFIED]: 1
+projectA/readme.txt
+
+[DELETED]: 1
+projectB/legacy.txt

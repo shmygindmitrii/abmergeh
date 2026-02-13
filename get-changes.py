@@ -102,7 +102,7 @@ def main():
             old_info = old_idx[p]
             if old_info[0] == size and old_info[1] == t:
                 old_hash = file_hash(old_info[2])
-                new_hash = file_hash(p)
+                new_hash = file_hash(path)
                 if old_hash != new_hash:
                     modified.append(p)
             else:
@@ -137,6 +137,8 @@ def main():
     def generate_grouped_log(title, items, size_fn):
         lines = []
         lines.append(f"\n[{title}]: {len(items)}")
+        if len(items) == 0:
+            return lines
         max_path_len = max(len(p) for p in items)
         if args.no_group:
             for p in items:
