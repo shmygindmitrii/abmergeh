@@ -15,6 +15,7 @@ DEFAULT_EXCLUDES = {
     ".idea", ".vs",
 }
 
+
 def should_skip(rel_parts, exclude_names):
     # Skip if any path segment matches exclude dir name
     return any(part in exclude_names for part in rel_parts)
@@ -163,12 +164,6 @@ def main():
             for p in items:
                 size = size_fn(p)
                 line = f"{p:<{max_path_len}}: {size:<10}"
-                if title == "MODIFIED":
-                    if old_git_history.is_git_repo:
-                        never_modified = "yes" if p in old_never_modified_files else "no"
-                    else:
-                        never_modified = "unknown"
-                    line += f" | old_repo_never_modified={never_modified}"
                 lines.append(line)
             return lines
         buckets = defaultdict(list)
@@ -183,15 +178,56 @@ def main():
             for p in bucket:
                 size = size_fn(p)
                 line = f"{p:<{max_path_len}}: {size:<10}"
-                if title == "MODIFIED":
-                    if old_git_history.is_git_repo:
-                        never_modified = "yes" if p in old_never_modified_files else "no"
-                    else:
-                        never_modified = "unknown"
-                    line += f" | old_repo_never_modified={never_modified}"
                 lines.append(line)
         return lines
-    
+
+    def generate_modified_grouped_log(items):
+        lines = []
+        lines.append(f"\n[MODIFIED]: {len(items)}")
+
+        if len(items) == 0:
+            return lines
+
+        max_path_len = max(len(p) for p in items)
+
+        if args.no_group:
+            extension_keys = ["(all)"]
+            buckets = {"(all)": list(items)}
+        else:
+            buckets = defaultdict(list)
+            for p in items:
+                buckets[ext_key(p)].append(p)
+            extension_keys = sorted(buckets.keys())
+
+        for ext in extension_keys:
+            bucket = buckets[ext]
+            bucket_sorted = sorted(
+                bucket,
+                key=lambda p: ((-new_size(p) if size_desc else new_size(p)), p.lower()),
+            )
+
+            if not args.no_group:
+                lines.append(f"\n[{ext}]: {len(bucket)}")
+
+            if old_git_history.is_git_repo:
+                never_modified = [p for p in bucket_sorted if p in old_never_modified_files]
+                modified_in_old = [p for p in bucket_sorted if p not in old_never_modified_files]
+            else:
+                never_modified = list(bucket_sorted)
+                modified_in_old = []
+
+            lines.append(f"\n[never-modified-in-old]: {len(never_modified)}")
+            for p in never_modified:
+                size = new_size(p)
+                lines.append(f"{p:<{max_path_len}}: {size:<10}")
+
+            lines.append(f"\n[modified-in-old]: {len(modified_in_old)}")
+            for p in modified_in_old:
+                size = new_size(p)
+                lines.append(f"{p:<{max_path_len}}: {size:<10} | conflict=yes")
+
+        return lines
+
     title_line = f"// ==== PROCESSED {count} FILES ===="
     print(title_line)
 
@@ -199,7 +235,7 @@ def main():
 
     added_lines = generate_grouped_log("ADDED", added, new_size)
     lines += added_lines
-    modified_lines = generate_grouped_log("MODIFIED", modified, new_size)
+    modified_lines = generate_modified_grouped_log(modified)
     lines += modified_lines
     if args.include_deleted:
         deleted_lines = generate_grouped_log("DELETED", deleted, old_size)
