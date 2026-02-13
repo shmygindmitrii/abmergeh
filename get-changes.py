@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from collections import defaultdict
 
+from git_utils import collect_git_history_info
+
 DEFAULT_EXCLUDES = {
     ".git", ".svn", ".hg",
     "Library", "Temp", "Obj", 
@@ -49,6 +51,8 @@ def ext_key(rel_path: str) -> str:
     suf = Path(name).suffix.lower()
     return suf[1:] if suf.startswith(".") and len(suf) > 1 else "(no_ext)"
 
+
+
 def main():
     ap = argparse.ArgumentParser(description="Compare two directories: added/modified/deleted, sorted by extension.")
     ap.add_argument("old_dir")
@@ -74,6 +78,9 @@ def main():
 
     if not old_root.exists() or not new_root.exists():
         raise SystemExit("Old or new directory does not exist.")
+
+    old_git_history = collect_git_history_info(old_root)
+    old_never_modified_files = old_git_history.added_never_modified_files
     
     start = time.time()
     print("Collecting old files.")
@@ -155,7 +162,14 @@ def main():
         if args.no_group:
             for p in items:
                 size = size_fn(p)
-                lines.append(f"{p:<{max_path_len}}: {size:<10}")
+                line = f"{p:<{max_path_len}}: {size:<10}"
+                if title == "MODIFIED":
+                    if old_git_history.is_git_repo:
+                        never_modified = "yes" if p in old_never_modified_files else "no"
+                    else:
+                        never_modified = "unknown"
+                    line += f" | old_repo_never_modified={never_modified}"
+                lines.append(line)
             return lines
         buckets = defaultdict(list)
         for p in items:
@@ -168,7 +182,14 @@ def main():
             )
             for p in bucket:
                 size = size_fn(p)
-                lines.append(f"{p:<{max_path_len}}: {size:<10}")
+                line = f"{p:<{max_path_len}}: {size:<10}"
+                if title == "MODIFIED":
+                    if old_git_history.is_git_repo:
+                        never_modified = "yes" if p in old_never_modified_files else "no"
+                    else:
+                        never_modified = "unknown"
+                    line += f" | old_repo_never_modified={never_modified}"
+                lines.append(line)
         return lines
     
     title_line = f"// ==== PROCESSED {count} FILES ===="
